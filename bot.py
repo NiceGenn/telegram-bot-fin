@@ -1,15 +1,15 @@
-# bot_final_v2.py
-
 import os
 import logging
 from datetime import datetime, timedelta
 import zipfile
 import io
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Set
 import asyncio
+from threading import Thread
 
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from flask import Flask
+from telegram import Update, ReplyKeyboardMarkup, Message
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, BaseFilter
 from dotenv import load_dotenv
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
@@ -27,13 +27,50 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Вы можете поменять это значение на 60 или любое другое
-EXPIRATION_THRESHOLD_DAYS = 30 
+# --- НАСТРОЙКИ БЕЗОПАСНОСТИ ---
+# ВАЖНО: Сначала запустите бота и отправьте ему команду /my_id.
+# Бот пришлет ваш ID. Вставьте его сюда.
+# Например: ALLOWED_USER_IDS = {123456789, 987654321}
+ALLOWED_USER_IDS: Set[int] = {123456789} # <--- ЗАМЕНИТЕ ЭТО НА ВАШ ID
+
+# Ограничение размера файла в байтах (здесь 20 МБ)
+MAX_FILE_SIZE = 20 * 1024 * 1024
+
+# --- ОБЩИЕ КОНСТАНТЫ ---
+EXPIRATION_THRESHOLD_DAYS = 30
 RED_FILL = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
 ORANGE_FILL = PatternFill(start_color="FFDDAA", end_color="FFDDAA", fill_type="solid")
 GREEN_FILL = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")
 EXCEL_HEADERS: Tuple[str, ...] = ("ФИО", "Учреждение", "Серийный номер", "Действителен с", "Действителен до", "Осталось дней")
 ALLOWED_EXTENSIONS: Tuple[str, ...] = ('.cer', '.crt', '.pem', '.der')
+
+
+# --- Код для веб-сервера "обманки" ---
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def index():
+    """Эта функция будет отвечать на запросы от UptimeRobot."""
+    return "I am alive!"
+
+def run_flask():
+    """Запускает Flask-сервер."""
+    # Render и другие хостинги предоставят порт в переменной окружения PORT
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host='0.0.0.0', port=port)
+
+
+# --- Кастомный фильтр для проверки доступа ---
+class AllowedUserFilter(BaseFilter):
+    def __init__(self, user_ids: Set[int]):
+        self.allowed_ids = user_ids
+
+    def filter(self, message: Message) -> bool:
+        # Возвращает True, если ID пользователя есть в нашем списке
+        return message.from_user.id in self.allowed_ids
+
+# Создаем экземпляр нашего фильтра
+allowed_users_filter = AllowedUserFilter(ALLOWED_USER_IDS)
 
 
 # --- Вспомогательные функции ---
@@ -92,30 +129,16 @@ def create_excel_report(cert_data_list: List[Dict[str, Any]]) -> io.BytesIO:
     excel_buffer.seek(0)
     return excel_buffer
 
-# <<< ИЗМЕНЕНИЕ: Функция теперь не показывает просроченные сертификаты
 def generate_summary_message(cert_data_list: List[Dict[str, Any]]) -> str:
-    """
-    Генерирует сводное сообщение ТОЛЬКО о скоро истекающих сертификатах.
-    Просроченные сертификаты игнорируются в сообщении.
-    """
-    expiring_soon_certs = []
+    expired_certs, expiring_soon_certs = [], []
     for cert_data in cert_data_list:
         days_left = cert_data["Осталось дней"]
-        # Собираем только те, что скоро истекают (0 <= дней <= порог)
-        if 0 <= days_left <= EXPIRATION_THRESHOLD_DAYS:
-            expiring_soon_certs.append(f"👤 {cert_data['ФИО']} — {cert_data['Действителен до'].strftime('%d.%m.%Y')} (осталось {days_left} дн.)")
-    
-    # Если есть такие сертификаты, формируем сообщение
-    if expiring_soon_certs:
-        message_parts = [
-            f"⚠️ Скоро истекают ({EXPIRATION_THRESHOLD_DAYS} дней):",
-            *expiring_soon_certs
-        ]
-        return "\n".join(message_parts)
-    # Если нет, возвращаем другое сообщение
-    else:
-        return "✅ Сертификатов, истекающих в ближайшее время, не найдено."
-
+        if days_left < 0: expired_certs.append(f"👤 {cert_data['ФИО']} — {cert_data['Действителен до'].strftime('%d.%m.%Y')} (истёк {abs(days_left)} дн.)")
+        elif 0 <= days_left <= EXPIRATION_THRESHOLD_DAYS: expiring_soon_certs.append(f"👤 {cert_data['ФИО']} — {cert_data['Действителен до'].strftime('%d.%m.%Y')} - Осталось дней – {days_left}.")
+    message_parts = []
+    if expired_certs: message_parts.extend(["❌ Просроченные сертификаты:", *expired_certs, "\n"])
+    if expiring_soon_certs: message_parts.extend([f"⚠️ Скоро истекают ({EXPIRATION_THRESHOLD_DAYS} дней):", *expiring_soon_certs])
+    return "\n".join(message_parts) if message_parts else "✅ Все сертификаты действительны или имеют большой срок действия."
 
 def _process_file_content(file_bytes: bytes, file_name: str) -> List[Dict[str, Any]]:
     all_certs_data = []
@@ -137,6 +160,11 @@ def _process_file_content(file_bytes: bytes, file_name: str) -> List[Dict[str, A
 
 
 # --- Обработчики команд и сообщений ---
+
+async def get_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отправляет пользователю его Telegram User ID."""
+    user_id = update.effective_user.id
+    await update.message.reply_text(f"Ваш User ID: `{user_id}`\n\nСкопируйте его и вставьте в переменную `ALLOWED_USER_IDS` в коде бота.", parse_mode='MarkdownV2')
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -215,38 +243,61 @@ async def handle_wrong_document(update: Update, context: ContextTypes.DEFAULT_TY
 # --- Основная функция ---
 
 async def main() -> None:
-    """Настраивает и запускает бота с использованием правильного асинхронного контекста."""
+    """Настраивает и запускает бота."""
     if not TELEGRAM_BOT_TOKEN:
         logger.error("Токен Telegram бота не найден.")
         return
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Регистрация всех обработчиков
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("❓ Помощь"), help_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("📜 Сертификат"), request_certificate_files))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("⚙️ Настройки"), settings_placeholder))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("📄 Заявка АКЦ"), acc_finance_placeholder))
+    # --- Регистрация всех обработчиков ---
+
+    # Временная команда для получения ID. У нее НЕТ фильтра доступа.
+    application.add_handler(CommandHandler("my_id", get_my_id))
+
+    # Команды, доступные только разрешенным пользователям
+    application.add_handler(CommandHandler("start", start, filters=allowed_users_filter))
+    application.add_handler(CommandHandler("help", help_command, filters=allowed_users_filter))
+
+    # Кнопки, доступные только разрешенным пользователям
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("❓ Помощь") & allowed_users_filter, help_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("📜 Сертификат") & allowed_users_filter, request_certificate_files))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("⚙️ Настройки") & allowed_users_filter, settings_placeholder))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("📄 Заявка АКЦ") & allowed_users_filter, acc_finance_placeholder))
+
+    # Обработчики документов с ограничением по размеру и доступу
     allowed_extensions_filter = (
-        filters.Document.FileExtension("zip") | filters.Document.FileExtension("cer") |
-        filters.Document.FileExtension("crt") | filters.Document.FileExtension("pem") |
+        filters.Document.FileExtension("zip") |
+        filters.Document.FileExtension("cer") |
+        filters.Document.FileExtension("crt") |
+        filters.Document.FileExtension("pem") |
         filters.Document.FileExtension("der")
     )
-    application.add_handler(MessageHandler(allowed_extensions_filter & ~filters.COMMAND, handle_document))
-    application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND, handle_wrong_document))
+    # Обработчик для правильных файлов
+    application.add_handler(MessageHandler(
+        allowed_extensions_filter & ~filters.COMMAND & allowed_users_filter & filters.Document.MAX_SIZE(MAX_FILE_SIZE),
+        handle_document
+    ))
+    # Обработчик для неправильных файлов
+    application.add_handler(MessageHandler(
+        filters.Document.ALL & ~filters.COMMAND & allowed_users_filter & filters.Document.MAX_SIZE(MAX_FILE_SIZE),
+        handle_wrong_document
+    ))
 
+    # Запуск бота с использованием стабильного асинхронного контекста
     try:
         logger.info("Бот запускается...")
         async with application:
+            # Запускаем веб-сервер в отдельном потоке
+            flask_thread = Thread(target=run_flask)
+            flask_thread.daemon = True
+            flask_thread.start()
+            logger.info("Веб-сервер для поддержания активности запущен.")
+            
             await application.start()
             await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
             logger.info("Бот успешно запущен и работает.")
             await asyncio.Future()
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Бот останавливается...")
-        logger.info("Бот успешно остановлен.")
     except Exception as e:
         logger.error(f"Произошла критическая ошибка: {e}", exc_info=True)
 
