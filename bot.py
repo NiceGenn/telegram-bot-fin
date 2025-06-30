@@ -1,5 +1,5 @@
 # =================================================================================
-#    ФИНАЛЬНАЯ ВЕРСИЯ БОТА (V28 - ЯВНАЯ РЕГИСТРАЦИЯ КНОПОК)
+#    ФИНАЛЬНАЯ ВЕРСИЯ БОТА (V29 - ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ CONVERSATIONHANDLER)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -76,8 +76,7 @@ def get_db_connection():
 
 def init_database():
     conn = get_db_connection()
-    if not conn:
-        return
+    if not conn: return
     try:
         with conn.cursor() as cursor:
             cursor.execute('''
@@ -91,8 +90,7 @@ def init_database():
     except psycopg2.Error as e:
         logger.error(f"Ошибка при инициализации таблицы: {e}", exc_info=True)
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 def save_user_threshold(user_id: int, threshold: int):
     conn = get_db_connection()
@@ -109,8 +107,7 @@ def save_user_threshold(user_id: int, threshold: int):
     except psycopg2.Error as e:
         logger.error(f"Ошибка при сохранении порога для пользователя {user_id}: {e}", exc_info=True)
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 def load_user_threshold(user_id: int) -> Optional[int]:
     conn = get_db_connection()
@@ -127,8 +124,7 @@ def load_user_threshold(user_id: int) -> Optional[int]:
         logger.error(f"Ошибка при загрузке порога для пользователя {user_id}: {e}", exc_info=True)
         return None
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 async def get_user_threshold(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> int:
     if 'threshold' in context.user_data:
@@ -211,30 +207,23 @@ def _process_file_content(file_bytes: bytes, file_name: str) -> List[Dict[str, A
 
 async def get_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    await update.message.reply_text(f"Ваш User ID: `{user_id}`\n\nСкопируйте его и вставьте в `ALLOWED_USER_IDS`.", parse_mode='Markdown')
+    await update.message.reply_text(f"Ваш User ID: `{user_id}`", parse_mode='Markdown')
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     keyboard = [["📜 Сертификат", "📄 Заявка АКЦ"], ["⚙️ Настройки", "❓ Помощь"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    start_message = (f"Привет, {user.mention_html()}! 👋\n\n"
-                     "Я бот для анализа цифровых сертификатов. Мои основные функции:\n"
-                     "– Анализ файлов .cer, .crt, .pem, .der\n"
-                     "– Обработка ZIP-архивов с сертификатами\n"
-                     "– Создание Excel-отчета со сроками действия\n\n"
-                     "Выберите действие в меню ниже:")
+    start_message = (f"Привет, {user.mention_html()}! 👋\n\nЯ бот для анализа цифровых сертификатов...")
     await update.message.reply_html(start_message, reply_markup=reply_markup)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(f"Чтобы получить отчет, нажмите на кнопку '📜 Сертификат' и отправьте мне файл(ы) в формате ({', '.join(ALLOWED_EXTENSIONS)}) или ZIP-архив.")
+    await update.message.reply_text(f"Чтобы получить отчет, нажмите '📜 Сертификат' и отправьте файл...")
 
 async def request_certificate_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Пожалуйста, отправьте мне файл(ы) сертификатов "
-                                     f"({', '.join(ALLOWED_EXTENSIONS)}) или ZIP-архив с ними.\n"
-                                     "Я проанализирую их и пришлю вам отчет.")
+    await update.message.reply_text("Пожалуйста, отправьте мне файл(ы) сертификатов...")
 
 async def acc_finance_placeholder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_html("📈 **Функция 'Заявка АКЦ-Финансы' в разработке.**\n\nСкоро здесь появится возможность автоматически формировать заявку на регистрацию (или изменение данных) пользователя в ЦИТП для прикрепления вашего сертификата.\n\nСледите за обновлениями!")
+    await update.message.reply_html("📈 **Функция 'Заявка АКЦ-Финансы' в разработке.**...")
 
 async def settings_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
@@ -249,7 +238,7 @@ async def settings_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def prompt_for_days(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
-    await query.edit_message_text(text="Пожалуйста, отправьте новое число дней для порога оповещения (например, 60).")
+    await query.edit_message_text(text="Пожалуйста, отправьте новое число дней (например, 60).")
     return TYPING_DAYS
 
 async def set_days(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -294,6 +283,16 @@ async def handle_wrong_document(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(f"❌ Файл слишком большой. Максимум: {MAX_FILE_SIZE / 1024 / 1024:.0f} МБ."); return
     await update.message.reply_text(f"❌ Неверный формат файла. Нужны: {', '.join(ALLOWED_EXTENSIONS)}, .zip")
 
+async def handle_simple_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает нажатия на простые кнопки."""
+    button_text = update.message.text
+    if button_text == "❓ Помощь":
+        await help_command(update, context)
+    elif button_text == "📜 Сертификат":
+        await request_certificate_files(update, context)
+    elif button_text == "📄 Заявка АКЦ":
+        await acc_finance_placeholder(update, context)
+
 
 # --- 6. ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА ---
 async def main() -> None:
@@ -307,7 +306,7 @@ async def main() -> None:
     
     # --- Регистрация всех обработчиков ---
 
-    # Диалог для НАСТРОЕК
+    # 1. Диалог для НАСТРОЕК.
     settings_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^⚙️ Настройки$') & user_filter, settings_entry)],
         states={
@@ -318,21 +317,21 @@ async def main() -> None:
             TYPING_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_days)],
         },
         fallbacks=[CommandHandler('start', start)],
-        per_message=True
+        # <<< ИЗМЕНЕНИЕ: Убираем per_message=True, чтобы исправить баг >>>
+        # Возвращаемся к поведению по умолчанию. В консоли будет безвредное предупреждение.
     )
-
-    # Команды
-    application.add_handler(CommandHandler("my_id", get_my_id)) # Без фильтра, для всех
+    
+    # 2. Команды
+    application.add_handler(CommandHandler("my_id", get_my_id))
     application.add_handler(CommandHandler("start", start, filters=user_filter))
     application.add_handler(CommandHandler("help", help_command, filters=user_filter))
+    
+    # 3. Кнопки. Важно, чтобы обработчик диалога шел ПЕРЕД общим обработчиком кнопок
+    application.add_handler(settings_conv_handler)
+    simple_buttons_text = "^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь)$"
+    application.add_handler(MessageHandler(filters.Regex(simple_buttons_text) & user_filter, handle_simple_buttons))
 
-    # Кнопки
-    application.add_handler(settings_conv_handler) # Регистрируем сам диалог
-    application.add_handler(MessageHandler(filters.Regex("^📜 Сертификат$") & user_filter, request_certificate_files))
-    application.add_handler(MessageHandler(filters.Regex("^📄 Заявка АКЦ$") & user_filter, acc_finance_placeholder))
-    application.add_handler(MessageHandler(filters.Regex("^❓ Помощь$") & user_filter, help_command))
-
-    # Файлы
+    # 4. Файлы
     allowed_extensions_filter = (
         filters.Document.FileExtension("zip") | filters.Document.FileExtension("cer") |
         filters.Document.FileExtension("crt") | filters.Document.FileExtension("pem") |
