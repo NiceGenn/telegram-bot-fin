@@ -2,4 +2,5 @@ python-telegram-bot
 python-dotenv
 cryptography
 openpyxl
-Flask
+fastapi
+uvicorn
