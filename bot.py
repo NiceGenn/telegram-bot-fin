@@ -1,5 +1,5 @@
 # =================================================================================
-#    ФИНАЛЬНАЯ ВЕРСИЯ БОТА (V20+, RENDER WEBSERVICE, ИСПРАВЛЕННАЯ v3)
+#    ФИНАЛЬНАЯ ВЕРСИЯ БОТА (V20+, RENDER WEBSERVICE, ИСПРАВЛЕННАЯ v4)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -13,7 +13,7 @@ import asyncio
 
 import uvicorn
 from fastapi import FastAPI
-# <<< ИЗМЕНЕНИЕ: Убран BaseFilter
+# <<< ИЗМЕНЕНИЕ: Убран BaseFilter из импорта
 from telegram import Update, ReplyKeyboardMarkup, Message
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from cryptography import x509
@@ -26,7 +26,6 @@ load_dotenv()
 
 
 # --- 2. НАСТРОЙКА И КОНСТАНТЫ ---
-
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
 logging.basicConfig(
@@ -35,10 +34,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ВАЖНО: Вставьте сюда ваш реальный ID, полученный от бота
-ALLOWED_USER_IDS: Set[int] = {96238783} 
+ALLOWED_USER_IDS: Set[int] = {96238783} # <--- ЗАМЕНИТЕ ЭТО НА ВАШ ID
 
-# <<< ИЗМЕНЕНИЕ: Используем простой встроенный фильтр вместо кастомного класса >>>
+# Используем простой встроенный фильтр вместо кастомного класса
 user_filter = filters.User(user_id=ALLOWED_USER_IDS)
 
 MAX_FILE_SIZE = 20 * 1024 * 1024
@@ -53,15 +51,13 @@ ALLOWED_EXTENSIONS: Tuple[str, ...] = ('.cer', '.crt', '.pem', '.der')
 # --- 3. ВЕБ-СЕРВЕР FASTAPI ---
 app = FastAPI(docs_url=None, redoc_url=None)
 
-@app.get("/", summary="Check if bot is running")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
+    """Корневой эндпоинт для проверки жизнеспособности сервиса Render/UptimeRobot."""
     return {"status": "bot is running"}
 
 
 # --- 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И ОБРАБОТЧИКИ ---
-
-# <<< ИЗМЕНЕНИЕ: Класс AllowedUserFilter полностью удален, он больше не нужен >>>
-
 def get_certificate_info(cert_bytes: bytes) -> Optional[Dict[str, Any]]:
     try:
         try:
