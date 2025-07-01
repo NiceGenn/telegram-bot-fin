@@ -1,5 +1,5 @@
 # =================================================================================
-#    ФИНАЛЬНАЯ ВЕРСИЯ БОТА (V29 - ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ CONVERSATIONHANDLER)
+#    ФИНАЛЬНАЯ ВЕРСИЯ БОТА (V30 - ИСПРАВЛЕНИЕ "ЗАСТРЕВАНИЯ" В ДИАЛОГЕ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -284,7 +284,6 @@ async def handle_wrong_document(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(f"❌ Неверный формат файла. Нужны: {', '.join(ALLOWED_EXTENSIONS)}, .zip")
 
 async def handle_simple_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обрабатывает нажатия на простые кнопки."""
     button_text = update.message.text
     if button_text == "❓ Помощь":
         await help_command(update, context)
@@ -292,6 +291,17 @@ async def handle_simple_buttons(update: Update, context: ContextTypes.DEFAULT_TY
         await request_certificate_files(update, context)
     elif button_text == "📄 Заявка АКЦ":
         await acc_finance_placeholder(update, context)
+
+# <<< НОВОЕ: Отдельная функция для отмены диалога >>>
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отменяет и завершает текущий диалог."""
+    logger.info(f"Пользователь {update.effective_user.id} отменил диалог.")
+    await update.message.reply_text(
+        'Действие отменено. Вы можете выбрать другую опцию в меню.'
+    )
+    # После отмены нужно, чтобы пользователь нажал кнопку еще раз.
+    # Это самый простой и надежный способ избежать путаницы.
+    return ConversationHandler.END
 
 
 # --- 6. ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА ---
@@ -316,9 +326,11 @@ async def main() -> None:
             ],
             TYPING_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_days)],
         },
-        fallbacks=[CommandHandler('start', start)],
-        # <<< ИЗМЕНЕНИЕ: Убираем per_message=True, чтобы исправить баг >>>
-        # Возвращаемся к поведению по умолчанию. В консоли будет безвредное предупреждение.
+        # <<< ИЗМЕНЕНИЕ: Добавляем универсальный отменщик диалога >>>
+        fallbacks=[
+            CommandHandler('start', start),
+            MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь)$'), cancel)
+        ],
     )
     
     # 2. Команды
