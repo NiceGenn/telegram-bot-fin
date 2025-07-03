@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФИНАЛЬНАЯ ВЕРСИЯ БОТА (V41 - С LIFESPAN МЕНЕДЖЕРОМ)
+#   ФИНАЛЬНАЯ ВЕРСИЯ БОТА (V43 - ГЛАВНЫЙ БОТ ДЛЯ RENDER)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -56,9 +56,9 @@ ALLOWED_EXTENSIONS: Tuple[str, ...] = ('.cer', '.crt', '.pem', '.der')
 YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
 CHOOSING_ACTION, TYPING_DAYS = range(2)
 
+
 # --- 3. ИНИЦИАЛИЗАЦИЯ БОТА И ВЕБ-СЕРВЕРА ---
 
-# Создаем объект application глобально, чтобы он был доступен в lifespan
 if not TELEGRAM_BOT_TOKEN:
     logger.error("Токен Telegram бота не найден! Завершение работы.")
     exit()
@@ -82,7 +82,6 @@ async def lifespan(app: FastAPI):
     await application.stop()
     await application.shutdown()
 
-# Создаем FastAPI приложение с lifespan
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
 
 @app.get("/")
@@ -111,6 +110,7 @@ def init_database():
                     user_id BIGINT NOT NULL,
                     youtube_url TEXT NOT NULL,
                     status VARCHAR(20) DEFAULT 'new',
+                    local_filepath TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -157,7 +157,7 @@ def create_download_task(user_id: int, youtube_url: str) -> Optional[str]:
     task_id = uuid.uuid4()
     try:
         with conn.cursor() as cursor:
-            cursor.execute("INSERT INTO download_tasks (task_id, user_id, youtube_url) VALUES (%s, %s, %s)", (str(task_id), user_id, youtube_url))
+            cursor.execute("INSERT INTO download_tasks (task_id, user_id, youtube_url, status) VALUES (%s, %s, %s, 'new')", (str(task_id), user_id, youtube_url))
         conn.commit()
         logger.info(f"Создано задание {task_id} для пользователя {user_id}")
         return str(task_id)
@@ -241,7 +241,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     keyboard = [["📜 Сертификат", "📄 Заявка АКЦ"], ["⚙️ Настройки", "❓ Помощь"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    start_message = (f"Привет, {user.mention_html()}! 👋\n\nЯ бот для анализа цифровых сертификатов и создания задач на скачивание видео.")
+    start_message = (f"Привет, {user.mention_html()}! 👋\n\nЯ бот для анализа сертификатов и создания задач на скачивание видео.")
     await update.message.reply_html(start_message, reply_markup=reply_markup)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -352,7 +352,5 @@ application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND &
 
 # --- 7. ТОЧКА ВХОДА ---
 if __name__ == "__main__":
-    # Эта часть теперь нужна только для тестов на вашем компьютере.
-    # Render будет использовать команду uvicorn и не будет выполнять этот блок.
     logger.info("Запуск в локальном режиме...")
     uvicorn.run(app, host="0.0.0.0", port=8000)
