@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФИНАЛЬНАЯ ВЕРСИЯ БОТА (V35 - ГЛАВНЫЙ БОТ, СОЗДАЕТ ЗАДАНИЯ)
+#   ФИНАЛЬНАЯ ВЕРСИЯ БОТА (V36 - ПОЛНАЯ КОНФИГУРАЦИЯ HANDLER'ОВ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -16,6 +16,8 @@ import re
 
 import uvicorn
 from fastapi import FastAPI
+import yt_dlp
+
 from telegram import Update, ReplyKeyboardMarkup, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -32,17 +34,16 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
 from dotenv import load_dotenv
+
 load_dotenv()
 
 
 # --- 2. НАСТРОЙКА И КОНСТАНТЫ ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
+BOT_MODE = os.environ.get("BOT_MODE", "main")
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 ALLOWED_USER_IDS: Set[int] = {96238783}
@@ -62,6 +63,7 @@ CHOOSING_ACTION, TYPING_DAYS = range(2)
 
 # --- 3. ВЕБ-СЕРВЕР И БАЗА ДАННЫХ ---
 app = FastAPI(docs_url=None, redoc_url=None)
+
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {"status": "bot is running"}
@@ -97,7 +99,7 @@ def init_database():
         if conn: conn.close()
 
 def save_user_threshold(user_id: int, threshold: int):
-    conn = get_db_connection()
+    conn = get_db_connection();
     if not conn: return
     try:
         with conn.cursor() as cursor:
@@ -154,8 +156,7 @@ def create_download_task(user_id: int, youtube_url: str) -> Optional[str]:
 # --- 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def create_excel_report(cert_data_list: List[Dict[str, Any]], user_threshold: int) -> io.BytesIO:
     wb = Workbook(); ws = wb.active; ws.title = "Отчет по сертификатам"
-    ws.append(list(EXCEL_HEADERS))
-    sorted_cert_data = sorted(cert_data_list, key=lambda x: x["Действителен до"])
+    ws.append(list(EXCEL_HEADERS)); sorted_cert_data = sorted(cert_data_list, key=lambda x: x["Действителен до"])
     for cert_data in sorted_cert_data:
         row = [cert_data["ФИО"], cert_data["Учреждение"], cert_data["Серийный номер"], cert_data["Действителен с"].strftime("%d.%m.%Y"), cert_data["Действителен до"].strftime("%d.%m.%Y"), cert_data["Осталось дней"]]
         ws.append(row); last_row = ws.max_row; days_left = cert_data["Осталось дней"]
@@ -218,17 +219,17 @@ def _process_file_content(file_bytes: bytes, file_name: str) -> List[Dict[str, A
     return all_certs_data
 
 
-# --- 5. ОБРАБОТЧИКИ КОМАНД И КНОПОК ---
+# --- 5. ОБРАБОТЧИКИ КОМАНД, КНОПОК И ДИАЛОГОВ ---
+async def get_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    await update.message.reply_text(f"Ваш User ID: `{user_id}`", parse_mode='Markdown')
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     keyboard = [["📜 Сертификат", "📄 Заявка АКЦ"], ["⚙️ Настройки", "❓ Помощь"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    start_message = (f"Привет, {user.mention_html()}! 👋\n\nЯ бот для анализа цифровых сертификатов и создания задач на скачивание видео.")
+    start_message = (f"Привет, {user.mention_html()}! 👋\n\nЯ бот для анализа сертификатов и создания задач на скачивание видео.")
     await update.message.reply_html(start_message, reply_markup=reply_markup)
-
-async def get_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    await update.message.reply_text(f"Ваш User ID: `{user_id}`", parse_mode='Markdown')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Чтобы получить отчет по сертификатам, нажмите '📜 Сертификат' и отправьте файлы. Чтобы скачать видео, просто отправьте ссылку на YouTube.")
@@ -280,22 +281,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def handle_wrong_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"❌ Неверный формат файла. Нужны: {', '.join(ALLOWED_EXTENSIONS)}, .zip")
 
-
-# --- 6. ДИАЛОГ НАСТРОЕК ---
 async def settings_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    current_threshold = await get_user_threshold(user_id, context)
+    user_id = update.effective_user.id; current_threshold = await get_user_threshold(user_id, context)
     keyboard = [[InlineKeyboardButton("Изменить порог", callback_data='change_threshold')], [InlineKeyboardButton("Назад", callback_data='back_to_main')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        f"⚙️ **Настройки оповещений**\nТекущий порог: **{current_threshold}** дней.",
-        reply_markup=reply_markup, parse_mode='Markdown'
-    )
+    await update.message.reply_text(f"⚙️ **Настройки**\nТекущий порог: **{current_threshold}** дней.", reply_markup=reply_markup, parse_mode='Markdown')
     return CHOOSING_ACTION
 
 async def prompt_for_days(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
-    await query.edit_message_text(text="Пожалуйста, отправьте новое число дней (например, 60).")
+    await query.edit_message_text(text="Отправьте новое число дней (например, 60).")
     return TYPING_DAYS
 
 async def set_days(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -320,14 +315,14 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
-# --- 7. ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА ---
+# --- 6. ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА ---
 async def main() -> None:
-    init_database()
     if not TELEGRAM_BOT_TOKEN or not DATABASE_URL:
         logger.error("Не найден токен или URL базы данных."); return
-
+    init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
+    # --- <<< ИСПРАВЛЕНИЕ: Полная и правильная конфигурация ConversationHandler >>>
     settings_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^⚙️ Настройки$') & user_filter, settings_entry)],
         states={
@@ -337,41 +332,46 @@ async def main() -> None:
             ],
             TYPING_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_days)],
         },
-        fallbacks=[
-            CommandHandler('start', start),
-            MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь)$'), cancel)
-        ],
+        fallbacks=[CommandHandler('start', start)],
     )
-    
-    application.add_handler(settings_conv_handler)
-    application.add_handler(CommandHandler("my_id", get_my_id))
-    application.add_handler(CommandHandler("start", start, filters=user_filter))
-    
-    # Обработчик для YouTube ссылок должен иметь приоритет над кнопками
-    application.add_handler(MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN) & user_filter, handle_youtube_link))
-    
-    simple_buttons_text = "^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь)$"
-    application.add_handler(MessageHandler(filters.Regex(simple_buttons_text) & user_filter, handle_simple_buttons))
 
-    allowed_extensions_filter = (filters.Document.FileExtension(ext.strip('.')) for ext in ALLOWED_EXTENSIONS)
-    application.add_handler(MessageHandler(filters.Document.FileExtension("zip") | filters.Or(*allowed_extensions_filter) & ~filters.COMMAND & user_filter, handle_document))
-    application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND & user_filter, handle_wrong_document))
+    # --- Регистрация всех обработчиков ---
+    if BOT_MODE == "worker":
+        # Логика для воркера (если понадобится, сейчас пустая)
+        logger.info("Бот запущен в режиме 'Рабочий'.")
+    else: # Режим "main"
+        application.add_handler(settings_conv_handler)
+        application.add_handler(CommandHandler("my_id", get_my_id))
+        application.add_handler(CommandHandler("start", start, filters=user_filter))
+        application.add_handler(MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN) & user_filter, handle_youtube_link))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & user_filter, handle_simple_buttons))
+        allowed_extensions_filter = (filters.Document.FileExtension(ext.strip('.')) for ext in ALLOWED_EXTENSIONS)
+        application.add_handler(MessageHandler(filters.Document.FileExtension("zip") | filters.Or(*allowed_extensions_filter) & ~filters.COMMAND & user_filter, handle_document))
+        application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND & user_filter, handle_wrong_document))
 
-    port = int(os.environ.get('PORT', 8000))
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
-    server = uvicorn.Server(config)
-    try:
-        logger.info("Запускаю бота (polling) и веб-сервер (uvicorn)...")
+    # --- Запуск ---
+    if BOT_MODE == "worker":
+        # Воркеру не нужен веб-сервер, только бот
         async with application:
             await application.start()
             await application.updater.start_polling()
-            await server.serve()
-            await application.updater.stop()
-            await application.stop()
-    except Exception as e:
-        logger.error(f"Произошла критическая ошибка при запуске: {e}", exc_info=True)
+            await asyncio.Future()
+    else: # main
+        port = int(os.environ.get('PORT', 8000))
+        config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+        server = uvicorn.Server(config)
+        logger.info("Запускаю бота (polling) и веб-сервер (uvicorn)...")
+        try:
+            async with application:
+                await application.start()
+                await application.updater.start_polling()
+                await server.serve()
+                await application.updater.stop()
+                await application.stop()
+        except Exception as e:
+            logger.error(f"Произошла критическая ошибка при запуске: {e}", exc_info=True)
 
 
-# --- 8. ТОЧКА ВХОДА ДЛЯ ЗАПУСКА СКРИПТА ---
+# --- 7. ТОЧКА ВХОДА ---
 if __name__ == "__main__":
     asyncio.run(main())
