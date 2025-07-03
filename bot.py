@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФИНАЛЬНАЯ ВЕРСИЯ БОТА (V37 - ИСПРАВЛЕНИЕ ФИЛЬТРА РАСШИРЕНИЙ)
+#   ФИНАЛЬНАЯ ВЕРСИЯ БОТА (V38 - ИСПРАВЛЕНИЕ ТИПА UUID ДЛЯ БД)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -57,7 +57,6 @@ GREEN_FILL = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="so
 EXCEL_HEADERS: Tuple[str, ...] = ("ФИО", "Учреждение", "Серийный номер", "Действителен с", "Действителен до", "Осталось дней")
 ALLOWED_EXTENSIONS: Tuple[str, ...] = ('.cer', '.crt', '.pem', '.der')
 YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
-
 CHOOSING_ACTION, TYPING_DAYS = range(2)
 
 
@@ -102,10 +101,7 @@ def save_user_threshold(user_id: int, threshold: int):
     if not conn: return
     try:
         with conn.cursor() as cursor:
-            cursor.execute(
-                "INSERT INTO user_settings (user_id, threshold) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET threshold = EXCLUDED.threshold;",
-                (user_id, threshold)
-            )
+            cursor.execute("INSERT INTO user_settings (user_id, threshold) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET threshold = EXCLUDED.threshold;",(user_id, threshold))
         conn.commit()
     finally:
         if conn: conn.close()
@@ -136,10 +132,13 @@ def create_download_task(user_id: int, youtube_url: str) -> Optional[str]:
     task_id = uuid.uuid4()
     try:
         with conn.cursor() as cursor:
-            cursor.execute("INSERT INTO download_tasks (task_id, user_id, youtube_url) VALUES (%s, %s, %s)", (task_id, user_id, youtube_url))
+            cursor.execute("INSERT INTO download_tasks (task_id, user_id, youtube_url) VALUES (%s, %s, %s)", (str(task_id), user_id, youtube_url))
         conn.commit()
         logger.info(f"Создано задание {task_id} для пользователя {user_id}")
         return str(task_id)
+    except psycopg2.Error as e:
+        logger.error(f"Ошибка при создании задания: {e}", exc_info=True)
+        return None
     finally:
         if conn: conn.close()
 
@@ -209,7 +208,6 @@ def _process_file_content(file_bytes: bytes, file_name: str) -> List[Dict[str, A
         if cert_info: all_certs_data.append(cert_info)
     return all_certs_data
 
-
 # --- 5. ОБРАБОТЧИКИ КОМАНД, КНОПОК И ДИАЛОГОВ ---
 async def get_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -219,7 +217,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     keyboard = [["📜 Сертификат", "📄 Заявка АКЦ"], ["⚙️ Настройки", "❓ Помощь"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    start_message = (f"Привет, {user.mention_html()}! 👋\n\nЯ бот для анализа сертификатов и создания задач на скачивание видео.")
+    start_message = (f"Привет, {user.mention_html()}! 👋\n\nЯ бот для анализа цифровых сертификатов и создания задач на скачивание видео.")
     await update.message.reply_html(start_message, reply_markup=reply_markup)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -309,45 +307,37 @@ async def main() -> None:
         logger.error("Не найден токен или URL базы данных."); return
     init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
+
     settings_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^⚙️ Настройки$') & user_filter, settings_entry)],
         states={
-            CHOOSING_ACTION: [
-                CallbackQueryHandler(prompt_for_days, pattern='^change_threshold$'),
-                CallbackQueryHandler(end_conversation, pattern='^back_to_main$'),
-            ],
+            CHOOSING_ACTION: [CallbackQueryHandler(prompt_for_days, pattern='^change_threshold$'), CallbackQueryHandler(end_conversation, pattern='^back_to_main$')],
             TYPING_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_days)],
         },
         fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь)$'), cancel)],
     )
-    
-    application.add_handler(settings_conv_handler)
-    application.add_handler(CommandHandler("my_id", get_my_id))
-    application.add_handler(CommandHandler("start", start, filters=user_filter))
-    application.add_handler(MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN) & user_filter, handle_youtube_link))
-    simple_buttons_text = "^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь)$"
-    application.add_handler(MessageHandler(filters.Regex(simple_buttons_text) & user_filter, handle_simple_buttons))
-
-    # <<< ИСПРАВЛЕНИЕ: Правильный способ объединить фильтры расширений >>>
-    allowed_extensions_filter = (
-        filters.Document.FileExtension("zip") |
-        filters.Document.FileExtension("cer") |
-        filters.Document.FileExtension("crt") |
-        filters.Document.FileExtension("pem") |
-        filters.Document.FileExtension("der")
-    )
-    application.add_handler(MessageHandler(allowed_extensions_filter & ~filters.COMMAND & user_filter, handle_document))
-    application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND & user_filter, handle_wrong_document))
 
     if BOT_MODE == "worker":
         logger.error("Этот скрипт (bot.py) не предназначен для запуска в режиме 'worker'. Запустите worker.py.")
         return
     else: # Режим "main"
+        application.add_handler(settings_conv_handler)
+        application.add_handler(CommandHandler("my_id", get_my_id))
+        application.add_handler(CommandHandler("start", start, filters=user_filter))
+        application.add_handler(MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN) & user_filter, handle_youtube_link))
+        simple_buttons_text = "^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь)$"
+        application.add_handler(MessageHandler(filters.Regex(simple_buttons_text) & user_filter, handle_simple_buttons))
+        allowed_extensions_filter = (
+            filters.Document.FileExtension("zip") | filters.Document.FileExtension("cer") |
+            filters.Document.FileExtension("crt") | filters.Document.FileExtension("pem") |
+            filters.Document.FileExtension("der")
+        )
+        application.add_handler(MessageHandler(allowed_extensions_filter & ~filters.COMMAND & user_filter, handle_document))
+        application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND & user_filter, handle_wrong_document))
         port = int(os.environ.get('PORT', 8000))
         config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
         server = uvicorn.Server(config)
-        logger.info("Запускаю бота (polling) и веб-сервер (uvicorn)...")
+        logger.info("Запускаю 'Главного' бота и веб-сервер...")
         try:
             async with application:
                 await application.start()
@@ -356,7 +346,7 @@ async def main() -> None:
                 await application.updater.stop()
                 await application.stop()
         except Exception as e:
-            logger.error(f"Произошла критическая ошибка при запуске: {e}", exc_info=True)
+            logger.error(f"Произошла критическая ошибка: {e}", exc_info=True)
 
 
 # --- 7. ТОЧКА ВХОДА ---
