@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФИНАЛЬНАЯ ВЕРСИЯ БОТА (V36 - ПОЛНАЯ КОНФИГУРАЦИЯ HANDLER'ОВ)
+#   ФИНАЛЬНАЯ ВЕРСИЯ БОТА (V37 - ИСПРАВЛЕНИЕ ФИЛЬТРА РАСШИРЕНИЙ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -63,7 +63,6 @@ CHOOSING_ACTION, TYPING_DAYS = range(2)
 
 # --- 3. ВЕБ-СЕРВЕР И БАЗА ДАННЫХ ---
 app = FastAPI(docs_url=None, redoc_url=None)
-
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {"status": "bot is running"}
@@ -72,8 +71,8 @@ def get_db_connection():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         return conn
-    except psycopg2.OperationalError as e:
-        logger.error(f"Не удалось подключиться к базе данных: {e}", exc_info=True)
+    except Exception as e:
+        logger.error(f"Не удалось подключиться к базе данных: {e}")
         return None
 
 def init_database():
@@ -93,13 +92,13 @@ def init_database():
             ''')
         conn.commit()
         logger.info("База данных PostgreSQL успешно инициализирована.")
-    except psycopg2.Error as e:
-        logger.error(f"Ошибка при инициализации таблиц: {e}", exc_info=True)
+    except Exception as e:
+        logger.error(f"Ошибка при инициализации таблиц: {e}")
     finally:
         if conn: conn.close()
 
 def save_user_threshold(user_id: int, threshold: int):
-    conn = get_db_connection();
+    conn = get_db_connection()
     if not conn: return
     try:
         with conn.cursor() as cursor:
@@ -108,8 +107,6 @@ def save_user_threshold(user_id: int, threshold: int):
                 (user_id, threshold)
             )
         conn.commit()
-    except psycopg2.Error as e:
-        logger.error(f"Ошибка при сохранении порога: {e}", exc_info=True)
     finally:
         if conn: conn.close()
 
@@ -121,9 +118,6 @@ def load_user_threshold(user_id: int) -> Optional[int]:
             cursor.execute("SELECT threshold FROM user_settings WHERE user_id = %s", (user_id,))
             result = cursor.fetchone()
         return result[0] if result else None
-    except psycopg2.Error as e:
-        logger.error(f"Ошибка при загрузке порога: {e}", exc_info=True)
-        return None
     finally:
         if conn: conn.close()
 
@@ -146,9 +140,6 @@ def create_download_task(user_id: int, youtube_url: str) -> Optional[str]:
         conn.commit()
         logger.info(f"Создано задание {task_id} для пользователя {user_id}")
         return str(task_id)
-    except psycopg2.Error as e:
-        logger.error(f"Ошибка при создании задания: {e}", exc_info=True)
-        return None
     finally:
         if conn: conn.close()
 
@@ -232,10 +223,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_html(start_message, reply_markup=reply_markup)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Чтобы получить отчет по сертификатам, нажмите '📜 Сертификат' и отправьте файлы. Чтобы скачать видео, просто отправьте ссылку на YouTube.")
+    await update.message.reply_text("Чтобы получить отчет по сертификатам, отправьте файлы. Чтобы скачать видео, отправьте ссылку на YouTube.")
 
 async def request_certificate_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Пожалуйста, отправьте мне файл(ы) сертификатов...")
+    await update.message.reply_text(f"Пожалуйста, отправьте мне файл(ы) сертификатов ({', '.join(ALLOWED_EXTENSIONS)}) или ZIP-архив.")
 
 async def acc_finance_placeholder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_html("📈 **Функция 'Заявка АКЦ-Финансы' в разработке.**")
@@ -253,10 +244,7 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
     url = update.message.text
     task_id = create_download_task(update.effective_user.id, url)
     if task_id:
-        await update.message.reply_text(
-            f"✅ Задание на скачивание создано.\n\nID: `{task_id}`\n\nЗапустите `worker.py` на вашем компьютере, он автоматически найдет и выполнит это задание.",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text(f"✅ Задание на скачивание создано.\n\nID: `{task_id}`\n\nЗапустите `worker.py` на вашем компьютере.", parse_mode='Markdown')
     else:
         await update.message.reply_text("❌ Не удалось создать задание на скачивание.")
 
@@ -322,7 +310,6 @@ async def main() -> None:
     init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # --- <<< ИСПРАВЛЕНИЕ: Полная и правильная конфигурация ConversationHandler >>>
     settings_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^⚙️ Настройки$') & user_filter, settings_entry)],
         states={
@@ -332,31 +319,31 @@ async def main() -> None:
             ],
             TYPING_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_days)],
         },
-        fallbacks=[CommandHandler('start', start)],
+        fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь)$'), cancel)],
     )
+    
+    application.add_handler(settings_conv_handler)
+    application.add_handler(CommandHandler("my_id", get_my_id))
+    application.add_handler(CommandHandler("start", start, filters=user_filter))
+    application.add_handler(MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN) & user_filter, handle_youtube_link))
+    simple_buttons_text = "^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь)$"
+    application.add_handler(MessageHandler(filters.Regex(simple_buttons_text) & user_filter, handle_simple_buttons))
 
-    # --- Регистрация всех обработчиков ---
+    # <<< ИСПРАВЛЕНИЕ: Правильный способ объединить фильтры расширений >>>
+    allowed_extensions_filter = (
+        filters.Document.FileExtension("zip") |
+        filters.Document.FileExtension("cer") |
+        filters.Document.FileExtension("crt") |
+        filters.Document.FileExtension("pem") |
+        filters.Document.FileExtension("der")
+    )
+    application.add_handler(MessageHandler(allowed_extensions_filter & ~filters.COMMAND & user_filter, handle_document))
+    application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND & user_filter, handle_wrong_document))
+
     if BOT_MODE == "worker":
-        # Логика для воркера (если понадобится, сейчас пустая)
-        logger.info("Бот запущен в режиме 'Рабочий'.")
+        logger.error("Этот скрипт (bot.py) не предназначен для запуска в режиме 'worker'. Запустите worker.py.")
+        return
     else: # Режим "main"
-        application.add_handler(settings_conv_handler)
-        application.add_handler(CommandHandler("my_id", get_my_id))
-        application.add_handler(CommandHandler("start", start, filters=user_filter))
-        application.add_handler(MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN) & user_filter, handle_youtube_link))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & user_filter, handle_simple_buttons))
-        allowed_extensions_filter = (filters.Document.FileExtension(ext.strip('.')) for ext in ALLOWED_EXTENSIONS)
-        application.add_handler(MessageHandler(filters.Document.FileExtension("zip") | filters.Or(*allowed_extensions_filter) & ~filters.COMMAND & user_filter, handle_document))
-        application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND & user_filter, handle_wrong_document))
-
-    # --- Запуск ---
-    if BOT_MODE == "worker":
-        # Воркеру не нужен веб-сервер, только бот
-        async with application:
-            await application.start()
-            await application.updater.start_polling()
-            await asyncio.Future()
-    else: # main
         port = int(os.environ.get('PORT', 8000))
         config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
         server = uvicorn.Server(config)
