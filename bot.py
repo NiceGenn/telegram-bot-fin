@@ -1,22 +1,19 @@
 # =================================================================================
-#   ФИНАЛЬНАЯ ВЕРСИЯ БОТА (V43 - ГЛАВНЫЙ БОТ ДЛЯ RENDER)
+#   ФАЙЛ: bot.py (V1 - ЕДИНАЯ ЛОКАЛЬНАЯ ВЕРСИЯ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
 import os
 import logging
 import asyncio
-from contextlib import asynccontextmanager
 from datetime import datetime
 import zipfile
 import io
 from typing import List, Dict, Any, Optional, Tuple, Set
 import psycopg2
-import uuid
-import re
+import yt_dlp
+import telegram
 
-import uvicorn
-from fastapi import FastAPI
 from telegram import Update, ReplyKeyboardMarkup, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -35,6 +32,7 @@ from openpyxl.utils import get_column_letter
 from dotenv import load_dotenv
 
 load_dotenv()
+
 
 # --- 2. НАСТРОЙКА И КОНСТАНТЫ ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -57,39 +55,7 @@ YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(c
 CHOOSING_ACTION, TYPING_DAYS = range(2)
 
 
-# --- 3. ИНИЦИАЛИЗАЦИЯ БОТА И ВЕБ-СЕРВЕРА ---
-
-if not TELEGRAM_BOT_TOKEN:
-    logger.error("Токен Telegram бота не найден! Завершение работы.")
-    exit()
-application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Управляет жизненным циклом бота вместе с веб-сервером."""
-    logger.info("Lifespan: Запуск бота...")
-    if not DATABASE_URL:
-        logger.warning("DATABASE_URL не найден. Работа с БД будет невозможна.")
-    else:
-        init_database()
-        
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    yield
-    logger.info("Lifespan: Остановка бота...")
-    await application.updater.stop()
-    await application.stop()
-    await application.shutdown()
-
-app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
-
-@app.get("/")
-async def root():
-    return {"status": "bot is running"}
-
-
-# --- 4. РАБОТА С БАЗОЙ ДАННЫХ ---
+# --- 3. РАБОТА С БАЗОЙ ДАННЫХ POSTGRESQL ---
 def get_db_connection():
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -104,16 +70,6 @@ def init_database():
     try:
         with conn.cursor() as cursor:
             cursor.execute('CREATE TABLE IF NOT EXISTS user_settings (user_id BIGINT PRIMARY KEY, threshold INTEGER NOT NULL)')
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS download_tasks (
-                    task_id UUID PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    youtube_url TEXT NOT NULL,
-                    status VARCHAR(20) DEFAULT 'new',
-                    local_filepath TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
         conn.commit()
         logger.info("База данных PostgreSQL успешно инициализирована.")
     except Exception as e:
@@ -151,24 +107,8 @@ async def get_user_threshold(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
         return threshold_from_db
     return EXPIRATION_THRESHOLD_DAYS
 
-def create_download_task(user_id: int, youtube_url: str) -> Optional[str]:
-    conn = get_db_connection()
-    if not conn: return None
-    task_id = uuid.uuid4()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("INSERT INTO download_tasks (task_id, user_id, youtube_url, status) VALUES (%s, %s, %s, 'new')", (str(task_id), user_id, youtube_url))
-        conn.commit()
-        logger.info(f"Создано задание {task_id} для пользователя {user_id}")
-        return str(task_id)
-    except psycopg2.Error as e:
-        logger.error(f"Ошибка при создании задания: {e}", exc_info=True)
-        return None
-    finally:
-        if conn: conn.close()
 
-
-# --- 5. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И ОБРАБОТЧИКИ ---
+# --- 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def create_excel_report(cert_data_list: List[Dict[str, Any]], user_threshold: int) -> io.BytesIO:
     wb = Workbook(); ws = wb.active; ws.title = "Отчет по сертификатам"
     ws.append(list(EXCEL_HEADERS)); sorted_cert_data = sorted(cert_data_list, key=lambda x: x["Действителен до"])
@@ -233,6 +173,8 @@ def _process_file_content(file_bytes: bytes, file_name: str) -> List[Dict[str, A
         if cert_info: all_certs_data.append(cert_info)
     return all_certs_data
 
+
+# --- 5. ОБРАБОТЧИКИ КОМАНД, КНОПОК И ДИАЛОГОВ ---
 async def get_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     await update.message.reply_text(f"Ваш User ID: `{user_id}`", parse_mode='Markdown')
@@ -241,11 +183,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     keyboard = [["📜 Сертификат", "📄 Заявка АКЦ"], ["⚙️ Настройки", "❓ Помощь"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    start_message = (f"Привет, {user.mention_html()}! 👋\n\nЯ бот для анализа сертификатов и создания задач на скачивание видео.")
+    start_message = (f"Привет, {user.mention_html()}! 👋\n\nЯ бот для анализа сертификатов и скачивания видео.")
     await update.message.reply_html(start_message, reply_markup=reply_markup)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Чтобы получить отчет по сертификатам, отправьте файлы. Чтобы скачать видео, отправьте ссылку на YouTube.")
+    await update.message.reply_text("Отправьте сертификаты для анализа или ссылку на YouTube для скачивания.")
 
 async def request_certificate_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Пожалуйста, отправьте мне файл(ы) сертификатов ({', '.join(ALLOWED_EXTENSIONS)}) или ZIP-архив.")
@@ -264,11 +206,35 @@ async def handle_simple_buttons(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     url = update.message.text
-    task_id = create_download_task(update.effective_user.id, url)
-    if task_id:
-        await update.message.reply_text(f"✅ Задание на скачивание создано.\n\nID: `{task_id}`\n\nЗапустите `worker.py` на вашем компьютере.", parse_mode='Markdown')
-    else:
-        await update.message.reply_text("❌ Не удалось создать задание на скачивание.")
+    user_id = update.effective_user.id
+    
+    msg = await update.message.reply_text("Начинаю загрузку видео, это может занять время...")
+    
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': f'{uuid.uuid4()}.%(ext)s',
+        'quiet': True,
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            video_filename = ydl.prepare_filename(info)
+        
+        await msg.edit_text("Видео скачано. Отправляю...")
+        with open(video_filename, 'rb') as video_file:
+            await context.bot.send_video(
+                chat_id=user_id, video=video_file, supports_streaming=True, 
+                read_timeout=120, write_timeout=120
+            )
+        
+        os.remove(video_filename)
+        await msg.delete()
+
+    except Exception as e:
+        logger.error(f"Ошибка при скачивании/отправке видео: {e}", exc_info=True)
+        await msg.edit_text(f"❌ Не удалось обработать видео по ссылке: {url}")
+
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     document = update.message.document
@@ -325,32 +291,43 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
-# --- 6. РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ ---
-settings_conv_handler = ConversationHandler(
-    entry_points=[MessageHandler(filters.Regex('^⚙️ Настройки$') & user_filter, settings_entry)],
-    states={
-        CHOOSING_ACTION: [CallbackQueryHandler(prompt_for_days, pattern='^change_threshold$'), CallbackQueryHandler(end_conversation, pattern='^back_to_main$')],
-        TYPING_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_days)],
-    },
-    fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь)$'), cancel)],
-)
+# --- 6. ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА ---
+async def main() -> None:
+    if not TELEGRAM_BOT_TOKEN or not DATABASE_URL:
+        logger.error("Не найден токен или URL базы данных."); return
+    init_database()
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    settings_conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex('^⚙️ Настройки$') & user_filter, settings_entry)],
+        states={
+            CHOOSING_ACTION: [CallbackQueryHandler(prompt_for_days, pattern='^change_threshold$'), CallbackQueryHandler(end_conversation, pattern='^back_to_main$')],
+            TYPING_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_days)],
+        },
+        fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь)$'), cancel)],
+    )
+    
+    application.add_handler(settings_conv_handler)
+    application.add_handler(CommandHandler("my_id", get_my_id))
+    application.add_handler(CommandHandler("start", start, filters=user_filter))
+    application.add_handler(MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN) & user_filter, handle_youtube_link))
+    simple_buttons_text = "^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь)$"
+    application.add_handler(MessageHandler(filters.Regex(simple_buttons_text) & user_filter, handle_simple_buttons))
+    allowed_extensions_filter = (
+        filters.Document.FileExtension("zip") | filters.Document.FileExtension("cer") |
+        filters.Document.FileExtension("crt") | filters.Document.FileExtension("pem") |
+        filters.Document.FileExtension("der")
+    )
+    application.add_handler(MessageHandler(allowed_extensions_filter & ~filters.COMMAND & user_filter, handle_document))
+    application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND & user_filter, handle_wrong_document))
 
-application.add_handler(settings_conv_handler)
-application.add_handler(CommandHandler("my_id", get_my_id))
-application.add_handler(CommandHandler("start", start, filters=user_filter))
-application.add_handler(MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN) & user_filter, handle_youtube_link))
-simple_buttons_text = "^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь)$"
-application.add_handler(MessageHandler(filters.Regex(simple_buttons_text) & user_filter, handle_simple_buttons))
-allowed_extensions_filter = (
-    filters.Document.FileExtension("zip") | filters.Document.FileExtension("cer") |
-    filters.Document.FileExtension("crt") | filters.Document.FileExtension("pem") |
-    filters.Document.FileExtension("der")
-)
-application.add_handler(MessageHandler(allowed_extensions_filter & ~filters.COMMAND & user_filter, handle_document))
-application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND & user_filter, handle_wrong_document))
+    try:
+        logger.info("Запускаю бота...")
+        await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        logger.error(f"Произошла критическая ошибка: {e}", exc_info=True)
 
 
 # --- 7. ТОЧКА ВХОДА ---
 if __name__ == "__main__":
-    logger.info("Запуск в локальном режиме...")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    asyncio.run(main())
