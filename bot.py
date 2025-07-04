@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V8 - ПРОВЕРКА РАЗМЕРА YOUTUBE ВИДЕО)
+#   ФАЙЛ: bot.py (V9 - ПОДТВЕРЖДЕНИЕ СКАЧИВАНИЯ YOUTUBE)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -57,7 +57,8 @@ EXCEL_HEADERS: Tuple[str, ...] = ("ФИО", "Учреждение", "Серий�
 ALLOWED_EXTENSIONS: Tuple[str, ...] = ('.cer', '.crt', '.pem', '.der')
 YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
 
-CHOOSING_ACTION, TYPING_DAYS, AWAITING_YOUTUBE_LINK = range(3)
+# <<< ИЗМЕНЕНИЕ: Добавлено новое состояние для диалога >>>
+CHOOSING_ACTION, TYPING_DAYS, AWAITING_YOUTUBE_LINK, CONFIRMING_DOWNLOAD = range(4)
 
 
 # --- 3. РАБОТА С БАЗОЙ ДАННЫХ POSTGRESQL ---
@@ -214,15 +215,13 @@ async def handle_simple_buttons(update: Update, context: ContextTypes.DEFAULT_TY
         await acc_finance_placeholder(update, context)
 
 def download_video_sync(url: str, ydl_opts: dict) -> str:
-    """Синхронная функция для выполнения блокирующей операции скачивания."""
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         return ydl.prepare_filename(info)
 
+# <<< ИЗМЕНЕНИЕ: Эта функция теперь только проверяет ссылку и запрашивает подтверждение >>>
 async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     url = update.message.text
-    user_id = update.effective_user.id
-    
     msg = await update.message.reply_text("Получаю информацию о видео...")
     
     try:
@@ -231,6 +230,7 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             info_dict = ydl.extract_info(url, download=False)
         
         filesize = info_dict.get('filesize') or info_dict.get('filesize_approx')
+        title = info_dict.get('title', 'Без названия')
         
         if not filesize:
             await msg.edit_text("❌ Не удалось определить размер видео. Попробуйте другую ссылку.")
@@ -238,48 +238,87 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if filesize > MAX_VIDEO_SIZE_BYTES:
             size_in_mb = filesize / 1024 / 1024
-            await msg.edit_text(
-                f"❌ Видео слишком большое ({size_in_mb:.1f} МБ).\n"
-                f"Я могу отправлять файлы размером до {MAX_VIDEO_SIZE_BYTES / 1024 / 1024:.0f} МБ."
-            )
+            await msg.edit_text(f"❌ Видео '{title}' слишком большое ({size_in_mb:.1f} МБ) и не может быть отправлено.")
             return ConversationHandler.END
 
-        await msg.edit_text("Начинаю загрузку видео, это может занять некоторое время...")
+        # Сохраняем информацию для следующего шага
+        context.user_data['youtube_url'] = url
+        context.user_data['youtube_title'] = title
         
-        ydl_opts_download = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'outtmpl': f'{uuid.uuid4()}.%(ext)s',
-            'quiet': True,
-        }
-        
-        video_filename = await asyncio.to_thread(
-            download_video_sync, url, ydl_opts_download
+        size_in_mb = filesize / 1024 / 1024
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Да, скачать", callback_data='yt_confirm'),
+                InlineKeyboardButton("❌ Нет, отмена", callback_data='yt_cancel'),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await msg.edit_text(
+            f"**Название:** {title}\n"
+            f"**Размер:** {size_in_mb:.1f} МБ\n\n"
+            "Начать скачивание?",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
         )
+        return CONFIRMING_DOWNLOAD
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении информации о YouTube видео: {e}", exc_info=True)
+        await msg.edit_text(f"❌ Не удалось получить информацию по ссылке: {url}")
+        return ConversationHandler.END
+
+# <<< НОВОЕ: Функция, которая запускается после подтверждения >>>
+async def start_download_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запускает скачивание после того, как пользователь нажал 'Да'."""
+    query = update.callback_query
+    await query.answer()
+    
+    url = context.user_data.get('youtube_url')
+    title = context.user_data.get('youtube_title', 'видео')
+    user_id = update.effective_user.id
+
+    if not url:
+        await query.edit_message_text("❌ Произошла ошибка, не могу найти ссылку. Пожалуйста, начните заново.")
+        return ConversationHandler.END
+
+    await query.edit_message_text(f"Начинаю загрузку '{title}', это может занять некоторое время...")
+    
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': f'{uuid.uuid4()}.%(ext)s',
+        'quiet': True,
+    }
+    
+    try:
+        video_filename = await asyncio.to_thread(download_video_sync, url, ydl_opts)
         
-        await msg.edit_text("Видео скачано. Отправляю...")
+        await query.edit_message_text("Видео скачано. Отправляю...")
         with open(video_filename, 'rb') as video_file:
             await context.bot.send_video(
                 chat_id=user_id, video=video_file, supports_streaming=True, 
                 read_timeout=120, write_timeout=120
             )
         os.remove(video_filename)
-        await msg.delete()
-
+        await query.message.delete()
     except Exception as e:
-        logger.error(f"Ошибка при обработке YouTube ссылки: {e}", exc_info=True)
-        await msg.edit_text(f"❌ Не удалось обработать видео по ссылке: {url}")
+        logger.error(f"Ошибка при скачивании/отправке видео: {e}", exc_info=True)
+        await query.edit_message_text(f"❌ Не удалось обработать видео по ссылке: {url}")
     
     return ConversationHandler.END
 
+async def cancel_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отменяет скачивание по кнопке 'Нет'."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Скачивание отменено.")
+    return ConversationHandler.END
+
 async def youtube_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Пожалуйста, отправьте ссылку на YouTube видео, которое вы хотите скачать.")
+    await update.message.reply_text("Пожалуйста, отправьте ссылку на YouTube видео.")
     return AWAITING_YOUTUBE_LINK
 
 async def invalid_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
-        "Это не похоже на ссылку YouTube. Пожалуйста, отправьте правильную ссылку "
-        "или отмените действие, нажав другую кнопку в меню."
-    )
+    await update.message.reply_text("Это не похоже на ссылку YouTube. Пожалуйста, отправьте правильную ссылку или отмените действие.")
     return AWAITING_YOUTUBE_LINK
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -359,6 +398,10 @@ async def main() -> None:
             AWAITING_YOUTUBE_LINK: [
                 MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_link),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invalid_youtube_link)
+            ],
+            CONFIRMING_DOWNLOAD: [
+                CallbackQueryHandler(start_download_confirmed, pattern='^yt_confirm$'),
+                CallbackQueryHandler(cancel_download, pattern='^yt_cancel$')
             ]
         },
         fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АКЦ|⚙️ Настройки|❓ Помощь)$'), cancel)]
