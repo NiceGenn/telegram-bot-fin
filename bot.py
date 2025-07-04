@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V3 - ДИАЛОГ ДЛЯ YOUTUBE)
+#   ФАЙЛ: bot.py (V8 - ПРОВЕРКА РАЗМЕРА YOUTUBE ВИДЕО)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -14,6 +14,7 @@ import psycopg2
 import yt_dlp
 import telegram
 import uuid
+import time
 
 from telegram import Update, ReplyKeyboardMarkup, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -46,6 +47,8 @@ ALLOWED_USER_IDS: Set[int] = {96238783}
 user_filter = filters.User(user_id=ALLOWED_USER_IDS)
 
 MAX_FILE_SIZE = 20 * 1024 * 1024
+MAX_VIDEO_SIZE_BYTES = 49 * 1024 * 1024 
+
 EXPIRATION_THRESHOLD_DAYS = 30
 RED_FILL = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
 ORANGE_FILL = PatternFill(start_color="FFDDAA", end_color="FFDDAA", fill_type="solid")
@@ -54,7 +57,6 @@ EXCEL_HEADERS: Tuple[str, ...] = ("ФИО", "Учреждение", "Серий�
 ALLOWED_EXTENSIONS: Tuple[str, ...] = ('.cer', '.crt', '.pem', '.der')
 YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
 
-# <<< ИЗМЕНЕНИЕ: Добавлено новое состояние для диалога >>>
 CHOOSING_ACTION, TYPING_DAYS, AWAITING_YOUTUBE_LINK = range(3)
 
 
@@ -184,7 +186,6 @@ async def get_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    # <<< ИЗМЕНЕНИЕ: Добавлена кнопка YouTube >>>
     keyboard = [
         ["📜 Сертификат", "🎬 YouTube"], 
         ["📄 Заявка АКЦ", "⚙️ Настройки"], 
@@ -212,22 +213,48 @@ async def handle_simple_buttons(update: Update, context: ContextTypes.DEFAULT_TY
     elif button_text == "📄 Заявка АКЦ":
         await acc_finance_placeholder(update, context)
 
-# <<< ИЗМЕНЕНИЕ: Эта функция теперь завершает диалог >>>
+def download_video_sync(url: str, ydl_opts: dict) -> str:
+    """Синхронная функция для выполнения блокирующей операции скачивания."""
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        return ydl.prepare_filename(info)
+
 async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     url = update.message.text
     user_id = update.effective_user.id
     
-    msg = await update.message.reply_text("Начинаю загрузку видео, это может занять время...")
-    
-    ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'outtmpl': f'{uuid.uuid4()}.%(ext)s', 'quiet': True,
-    }
+    msg = await update.message.reply_text("Получаю информацию о видео...")
     
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            video_filename = ydl.prepare_filename(info)
+        ydl_opts_info = {'quiet': True, 'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'}
+        with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+            info_dict = ydl.extract_info(url, download=False)
+        
+        filesize = info_dict.get('filesize') or info_dict.get('filesize_approx')
+        
+        if not filesize:
+            await msg.edit_text("❌ Не удалось определить размер видео. Попробуйте другую ссылку.")
+            return ConversationHandler.END
+
+        if filesize > MAX_VIDEO_SIZE_BYTES:
+            size_in_mb = filesize / 1024 / 1024
+            await msg.edit_text(
+                f"❌ Видео слишком большое ({size_in_mb:.1f} МБ).\n"
+                f"Я могу отправлять файлы размером до {MAX_VIDEO_SIZE_BYTES / 1024 / 1024:.0f} МБ."
+            )
+            return ConversationHandler.END
+
+        await msg.edit_text("Начинаю загрузку видео, это может занять некоторое время...")
+        
+        ydl_opts_download = {
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'outtmpl': f'{uuid.uuid4()}.%(ext)s',
+            'quiet': True,
+        }
+        
+        video_filename = await asyncio.to_thread(
+            download_video_sync, url, ydl_opts_download
+        )
         
         await msg.edit_text("Видео скачано. Отправляю...")
         with open(video_filename, 'rb') as video_file:
@@ -237,20 +264,18 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         os.remove(video_filename)
         await msg.delete()
+
     except Exception as e:
-        logger.error(f"Ошибка при скачивании/отправке видео: {e}", exc_info=True)
+        logger.error(f"Ошибка при обработке YouTube ссылки: {e}", exc_info=True)
         await msg.edit_text(f"❌ Не удалось обработать видео по ссылке: {url}")
     
     return ConversationHandler.END
 
-# <<< НОВОЕ: Функции для диалога скачивания с YouTube >>>
 async def youtube_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Начало диалога скачивания видео."""
     await update.message.reply_text("Пожалуйста, отправьте ссылку на YouTube видео, которое вы хотите скачать.")
     return AWAITING_YOUTUBE_LINK
 
 async def invalid_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Сообщает пользователю, что отправленный текст не является ссылкой."""
     await update.message.reply_text(
         "Это не похоже на ссылку YouTube. Пожалуйста, отправьте правильную ссылку "
         "или отмените действие, нажав другую кнопку в меню."
@@ -319,9 +344,6 @@ async def main() -> None:
     init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # --- <<< ИЗМЕНЕНИЕ: Добавлен диалог для YouTube >>>
-    
-    # 1. Диалог для НАСТРОЕК
     settings_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^⚙️ Настройки$') & user_filter, settings_entry)],
         states={
@@ -331,7 +353,6 @@ async def main() -> None:
         fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь|🎬 YouTube)$'), cancel)],
     )
 
-    # 2. Диалог для YOUTUBE
     youtube_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^🎬 YouTube$') & user_filter, youtube_entry)],
         states={
@@ -343,18 +364,15 @@ async def main() -> None:
         fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АКЦ|⚙️ Настройки|❓ Помощь)$'), cancel)]
     )
     
-    # --- Регистрация всех обработчиков ---
     application.add_handler(settings_conv_handler)
     application.add_handler(youtube_conv_handler)
     
     application.add_handler(CommandHandler("my_id", get_my_id))
     application.add_handler(CommandHandler("start", start, filters=user_filter))
     
-    # Обработчик для остальных кнопок
     simple_buttons_text = "^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь)$"
     application.add_handler(MessageHandler(filters.Regex(simple_buttons_text) & user_filter, handle_simple_buttons))
     
-    # Обработчики файлов
     allowed_extensions_filter = (
         filters.Document.FileExtension("zip") | filters.Document.FileExtension("cer") |
         filters.Document.FileExtension("crt") | filters.Document.FileExtension("pem") |
