@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V2 - ИСПРАВЛЕННЫЙ ЛОКАЛЬНЫЙ ЗАПУСК)
+#   ФАЙЛ: bot.py (V3 - ДИАЛОГ ДЛЯ YOUTUBE)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -53,7 +53,9 @@ GREEN_FILL = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="so
 EXCEL_HEADERS: Tuple[str, ...] = ("ФИО", "Учреждение", "Серийный номер", "Действителен с", "Действителен до", "Осталось дней")
 ALLOWED_EXTENSIONS: Tuple[str, ...] = ('.cer', '.crt', '.pem', '.der')
 YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
-CHOOSING_ACTION, TYPING_DAYS = range(2)
+
+# <<< ИЗМЕНЕНИЕ: Добавлено новое состояние для диалога >>>
+CHOOSING_ACTION, TYPING_DAYS, AWAITING_YOUTUBE_LINK = range(3)
 
 
 # --- 3. РАБОТА С БАЗОЙ ДАННЫХ POSTGRESQL ---
@@ -182,13 +184,18 @@ async def get_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    keyboard = [["📜 Сертификат", "📄 Заявка АКЦ"], ["⚙️ Настройки", "❓ Помощь"]]
+    # <<< ИЗМЕНЕНИЕ: Добавлена кнопка YouTube >>>
+    keyboard = [
+        ["📜 Сертификат", "🎬 YouTube"], 
+        ["📄 Заявка АКЦ", "⚙️ Настройки"], 
+        ["❓ Помощь"]
+    ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     start_message = (f"Привет, {user.mention_html()}! 👋\n\nЯ бот для анализа сертификатов и скачивания видео.")
     await update.message.reply_html(start_message, reply_markup=reply_markup)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Отправьте сертификаты для анализа или ссылку на YouTube для скачивания.")
+    await update.message.reply_text("Отправьте сертификаты для анализа или нажмите '🎬 YouTube' для скачивания видео.")
 
 async def request_certificate_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Пожалуйста, отправьте мне файл(ы) сертификатов ({', '.join(ALLOWED_EXTENSIONS)}) или ZIP-архив.")
@@ -205,7 +212,8 @@ async def handle_simple_buttons(update: Update, context: ContextTypes.DEFAULT_TY
     elif button_text == "📄 Заявка АКЦ":
         await acc_finance_placeholder(update, context)
 
-async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# <<< ИЗМЕНЕНИЕ: Эта функция теперь завершает диалог >>>
+async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     url = update.message.text
     user_id = update.effective_user.id
     
@@ -213,8 +221,7 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'outtmpl': f'{uuid.uuid4()}.%(ext)s',
-        'quiet': True,
+        'outtmpl': f'{uuid.uuid4()}.%(ext)s', 'quiet': True,
     }
     
     try:
@@ -228,14 +235,27 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                 chat_id=user_id, video=video_file, supports_streaming=True, 
                 read_timeout=120, write_timeout=120
             )
-        
         os.remove(video_filename)
         await msg.delete()
-
     except Exception as e:
         logger.error(f"Ошибка при скачивании/отправке видео: {e}", exc_info=True)
         await msg.edit_text(f"❌ Не удалось обработать видео по ссылке: {url}")
+    
+    return ConversationHandler.END
 
+# <<< НОВОЕ: Функции для диалога скачивания с YouTube >>>
+async def youtube_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начало диалога скачивания видео."""
+    await update.message.reply_text("Пожалуйста, отправьте ссылку на YouTube видео, которое вы хотите скачать.")
+    return AWAITING_YOUTUBE_LINK
+
+async def invalid_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Сообщает пользователю, что отправленный текст не является ссылкой."""
+    await update.message.reply_text(
+        "Это не похоже на ссылку YouTube. Пожалуйста, отправьте правильную ссылку "
+        "или отмените действие, нажав другую кнопку в меню."
+    )
+    return AWAITING_YOUTUBE_LINK
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     document = update.message.document
@@ -299,21 +319,42 @@ async def main() -> None:
     init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
+    # --- <<< ИЗМЕНЕНИЕ: Добавлен диалог для YouTube >>>
+    
+    # 1. Диалог для НАСТРОЕК
     settings_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^⚙️ Настройки$') & user_filter, settings_entry)],
         states={
             CHOOSING_ACTION: [CallbackQueryHandler(prompt_for_days, pattern='^change_threshold$'), CallbackQueryHandler(end_conversation, pattern='^back_to_main$')],
             TYPING_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_days)],
         },
-        fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь)$'), cancel)],
+        fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь|🎬 YouTube)$'), cancel)],
+    )
+
+    # 2. Диалог для YOUTUBE
+    youtube_conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex('^🎬 YouTube$') & user_filter, youtube_entry)],
+        states={
+            AWAITING_YOUTUBE_LINK: [
+                MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_link),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, invalid_youtube_link)
+            ]
+        },
+        fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АКЦ|⚙️ Настройки|❓ Помощь)$'), cancel)]
     )
     
+    # --- Регистрация всех обработчиков ---
     application.add_handler(settings_conv_handler)
+    application.add_handler(youtube_conv_handler)
+    
     application.add_handler(CommandHandler("my_id", get_my_id))
     application.add_handler(CommandHandler("start", start, filters=user_filter))
-    application.add_handler(MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN) & user_filter, handle_youtube_link))
+    
+    # Обработчик для остальных кнопок
     simple_buttons_text = "^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь)$"
     application.add_handler(MessageHandler(filters.Regex(simple_buttons_text) & user_filter, handle_simple_buttons))
+    
+    # Обработчики файлов
     allowed_extensions_filter = (
         filters.Document.FileExtension("zip") | filters.Document.FileExtension("cer") |
         filters.Document.FileExtension("crt") | filters.Document.FileExtension("pem") |
@@ -322,13 +363,12 @@ async def main() -> None:
     application.add_handler(MessageHandler(allowed_extensions_filter & ~filters.COMMAND & user_filter, handle_document))
     application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND & user_filter, handle_wrong_document))
 
-    # <<< ИСПРАВЛЕНИЕ: Используем правильный неблокирующий запуск >>>
     try:
         logger.info("Запускаю бота...")
         async with application:
             await application.start()
             await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-            await asyncio.Future()  # Работаем вечно, пока не будет прерывания
+            await asyncio.Future()
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот останавливается...")
     except Exception as e:
