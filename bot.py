@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V1 - ЕДИНАЯ ЛОКАЛЬНАЯ ВЕРСИЯ)
+#   ФАЙЛ: bot.py (V2 - ИСПРАВЛЕННЫЙ ЛОКАЛЬНЫЙ ЗАПУСК)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -13,6 +13,7 @@ from typing import List, Dict, Any, Optional, Tuple, Set
 import psycopg2
 import yt_dlp
 import telegram
+import uuid
 
 from telegram import Update, ReplyKeyboardMarkup, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -321,9 +322,15 @@ async def main() -> None:
     application.add_handler(MessageHandler(allowed_extensions_filter & ~filters.COMMAND & user_filter, handle_document))
     application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND & user_filter, handle_wrong_document))
 
+    # <<< ИСПРАВЛЕНИЕ: Используем правильный неблокирующий запуск >>>
     try:
         logger.info("Запускаю бота...")
-        await application.run_polling(allowed_updates=Update.ALL_TYPES)
+        async with application:
+            await application.start()
+            await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+            await asyncio.Future()  # Работаем вечно, пока не будет прерывания
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Бот останавливается...")
     except Exception as e:
         logger.error(f"Произошла критическая ошибка: {e}", exc_info=True)
 
