@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V2.9 - ИСПРАВЛЕНИЕ СОСТОЯНИЙ ДИАЛОГА)
+#   ФАЙЛ: bot.py (V3.0 - ПЕРЕИМЕНОВАНИЕ КНОПОК И ИСПРАВЛЕНИЕ ОТМЕНЫ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -59,7 +59,7 @@ EXCEL_HEADERS: Tuple[str, ...] = ("ФИО", "Учреждение", "Серий�
 ALLOWED_EXTENSIONS: Tuple[str, ...] = ('.cer', '.crt', '.pem', '.der')
 YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
 
-# <<< ИСПРАВЛЕНИЕ: Количество состояний теперь 15 >>>
+# Состояния для диалогов
 (
     CHOOSING_ACTION, TYPING_DAYS, AWAITING_YOUTUBE_LINK, CONFIRMING_DOWNLOAD,
     AKC_CONFIRM_DEFAULTS, AKC_SENDER_FIO, AKC_ORG_NAME, AKC_INN_KPP, AKC_MUNICIPALITY,
@@ -253,41 +253,55 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
 
     doc.add_paragraph() 
 
-    header_table = doc.add_table(rows=5, cols=2)
+    p = doc.add_paragraph()
+    run = p.add_run("От кого: ")
+    run.bold = True
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(12)
+    run = p.add_run(f"{form_data.get('sender_fio', '')}\n")
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(12)
     
-    header_data = [
-        ("От кого:", form_data.get('sender_fio', '')),
-        ("(Ф.И.О. представителя учреждения)", form_data.get('org_name', '')),
-        ("(наименование учреждения)", form_data.get('inn_kpp', '')),
-        ("(ИНН/КПП)", form_data.get('municipality', '')),
-        ("(наименование муниципального образования)", datetime.now().strftime('%d.%m.%Y')),
-    ]
+    run = p.add_run("(Ф.И.О. представителя учреждения)\n")
+    run.italic = True
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(10)
+    
+    run = p.add_run(f"{form_data.get('org_name', '')}\n")
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(12)
 
-    for i, (label, value) in enumerate(header_data):
-        left_cell = header_table.cell(i, 0)
-        left_p = left_cell.paragraphs[0]
-        left_run = left_p.add_run(label)
-        left_run.italic = True
-        left_run.font.name = 'Times New Roman'
-        left_run.font.size = Pt(10)
-        left_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    run = p.add_run("(наименование учреждения)\n")
+    run.italic = True
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(10)
 
-        right_cell = header_table.cell(i, 1)
-        right_p = right_cell.paragraphs[0]
-        right_run = right_p.add_run(value)
-        right_run.font.name = 'Times New Roman'
-        right_run.font.size = Pt(12)
-        
-        if i == 0:
-            right_p.text = ""
-            run_bold = right_p.add_run("От кого: ")
-            run_bold.bold = True
-            run_bold.font.name = 'Times New Roman'
-            run_bold.font.size = Pt(12)
-            run_normal = right_p.add_run(value)
-            run_normal.font.name = 'Times New Roman'
-            run_normal.font.size = Pt(12)
-            left_cell.text = ""
+    run = p.add_run(f"{form_data.get('inn_kpp', '')}\n")
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(12)
+
+    run = p.add_run("(ИНН/КПП)\n")
+    run.italic = True
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(10)
+
+    run = p.add_run(f"{form_data.get('municipality', '')}\n")
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(12)
+
+    run = p.add_run("(наименование муниципального образования)\n")
+    run.italic = True
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(10)
+
+    run = p.add_run(f"{datetime.now().strftime('%d.%m.%Y')}\n")
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(12)
+
+    run = p.add_run("(дата)")
+    run.italic = True
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(10)
 
     doc.add_paragraph()
 
@@ -366,17 +380,30 @@ async def get_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+    # <<< ИЗМЕНЕНИЕ: Новые названия и порядок кнопок >>>
     keyboard = [
-        ["📜 Сертификат", "🎬 YouTube"], 
-        ["📄 Заявка АЦК", "⚙️ Настройки"], 
+        ["📜 Анализ сертификатов", "⚙️ Настройки анализа сертификатов"],
+        ["🎬 Скачивание с YouTube", "📄 Заявка АЦК"], 
         ["❓ Помощь"]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     start_message = (f"Привет, {user.mention_html()}! 👋\n\nЯ бот для анализа сертификатов и скачивания видео.")
     await update.message.reply_html(start_message, reply_markup=reply_markup)
 
+# <<< ИЗМЕНЕНИЕ: Обновлен текст справки >>>
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Отправьте сертификаты для анализа или нажмите '🎬 YouTube' для скачивания видео.")
+    help_text = (
+        "Я могу помочь вам с несколькими задачами:\n\n"
+        "📜 **Анализ сертификатов**\n"
+        "Нажмите кнопку и отправьте файлы `.cer`, `.crt` или `.zip`-архив для создания Excel-отчета.\n\n"
+        "📄 **Заявка АЦК**\n"
+        "Нажмите кнопку, чтобы запустить пошаговый мастер создания заявки в формате DOCX.\n\n"
+        "🎬 **Скачивание с YouTube**\n"
+        "Нажмите кнопку и отправьте ссылку, чтобы скачать видео.\n\n"
+        "⚙️ **Настройки анализа сертификатов**\n"
+        "Измените порог оповещения об истекающих сертификатах."
+    )
+    await update.message.reply_text(help_text)
 
 async def request_certificate_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Пожалуйста, отправьте мне файл(ы) сертификатов ({', '.join(ALLOWED_EXTENSIONS)}) или ZIP-архив.")
@@ -385,7 +412,7 @@ async def handle_simple_buttons(update: Update, context: ContextTypes.DEFAULT_TY
     button_text = update.message.text
     if button_text == "❓ Помощь":
         await help_command(update, context)
-    elif button_text == "📜 Сертификат":
+    elif button_text == "Анализ сертификатов":
         await request_certificate_files(update, context)
 
 def download_video_sync(url: str, ydl_opts: dict) -> str:
@@ -668,10 +695,10 @@ async def main() -> None:
     init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    cancel_handler = MessageHandler(filters.Regex('^(📜 Сертификат|🎬 YouTube|📄 Заявка АЦК|⚙️ Настройки|❓ Помощь)$') & user_filter, cancel)
+    cancel_handler = MessageHandler(filters.Regex('^(Анализ сертификатов|Скачивание с YouTube|📄 Заявка АЦК|Настройки анализа сертификатов|❓ Помощь)$') & user_filter, cancel)
     
     settings_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^⚙️ Настройки$') & user_filter, settings_entry)],
+        entry_points=[MessageHandler(filters.Regex('^Настройки анализа сертификатов$') & user_filter, settings_entry)],
         states={
             CHOOSING_ACTION: [CallbackQueryHandler(prompt_for_days, pattern='^change_threshold$'), CallbackQueryHandler(end_conversation, pattern='^back_to_main$')],
             TYPING_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_days)],
@@ -679,7 +706,7 @@ async def main() -> None:
         fallbacks=[CommandHandler('start', start), cancel_handler],
     )
     youtube_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^🎬 YouTube$') & user_filter, youtube_entry)],
+        entry_points=[MessageHandler(filters.Regex('^Скачивание с YouTube$') & user_filter, youtube_entry)],
         states={
             AWAITING_YOUTUBE_LINK: [MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_link), MessageHandler(filters.TEXT & ~filters.COMMAND, invalid_youtube_link)],
             CONFIRMING_DOWNLOAD: [CallbackQueryHandler(start_download_confirmed, pattern='^yt_confirm$'), CallbackQueryHandler(cancel_download, pattern='^yt_cancel$')]
@@ -718,7 +745,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("my_id", get_my_id))
     application.add_handler(CommandHandler("start", start, filters=user_filter))
     
-    simple_buttons_text = "^(📜 Сертификат|❓ Помощь)$"
+    simple_buttons_text = "^(Анализ сертификатов|❓ Помощь)$"
     application.add_handler(MessageHandler(filters.Regex(simple_buttons_text) & user_filter, handle_simple_buttons))
     
     allowed_extensions_filter = (
