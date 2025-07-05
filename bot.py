@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V2.0 - РЕАЛИЗАЦИЯ ЗАЯВКИ АКЦ)
+#   ФАЙЛ: bot.py (V2.1 - УБРАНА СТРОКА 'КОМУ')
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -205,16 +205,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def request_certificate_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Пожалуйста, отправьте мне файл(ы) сертификатов ({', '.join(ALLOWED_EXTENSIONS)}) или ZIP-архив.")
 
-async def acc_finance_placeholder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_html("📈 **Функция 'Заявка АКЦ-Финансы' в разработке.**")
-
 async def handle_simple_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     button_text = update.message.text
     if button_text == "❓ Помощь":
         await help_command(update, context)
     elif button_text == "📜 Сертификат":
         await request_certificate_files(update, context)
-    # Кнопка "Заявка АКЦ" теперь обрабатывается своим диалогом
 
 def download_video_sync(url: str, ydl_opts: dict) -> str:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -402,7 +398,8 @@ async def akc_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
     action = query.data.split('_')[1]; context.user_data['akc_form']['action'] = action
     form = context.user_data['akc_form']
-    final_text = (f"Кому: cert@fin.amurobl.ru\nТема: Заявка на регистрацию пользователя ЦИТП\n\n"
+    # <<< ИЗМЕНЕНИЕ: Убрана строка "Кому:" >>>
+    final_text = (f"Тема: Заявка на регистрацию пользователя ЦИТП\n\n"
                   f"От кого: {form['sender_fio']}\nУчреждение: {form['org_name']}\nИНН/КПП: {form['inn_kpp']}\n"
                   f"Муниципальное образование: {form['municipality']}\nДата: {datetime.now().strftime('%d.%m.%Y')}\n\n"
                   f"ЗАЯВКА на регистрацию пользователя ЦИТП\n\nПрошу выполнить следующее действие: **{form['action']}**\n\n"
