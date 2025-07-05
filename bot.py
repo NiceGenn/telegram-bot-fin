@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V2.8 - КОРРЕКТНЫЙ ЗАПУСК/ОСТАНОВКА)
+#   ФАЙЛ: bot.py (V3.1 - ЗАЯВКА И СЕРТИФИКАТ В ZIP-АРХИВЕ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -61,9 +61,8 @@ YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(c
 (
     CHOOSING_ACTION, TYPING_DAYS, AWAITING_YOUTUBE_LINK, CONFIRMING_DOWNLOAD,
     AKC_CONFIRM_DEFAULTS, AKC_SENDER_FIO, AKC_ORG_NAME, AKC_INN_KPP, AKC_MUNICIPALITY,
-    AKC_CERT_OWNER, AKC_ROLE, AKC_CITP_NAME, AKC_CERT_SERIAL,
-    AKC_LOGINS, AKC_ACTION
-) = range(15)
+    AKC_AWAIT_CERTIFICATE, AKC_ROLE, AKC_CITP_NAME, AKC_LOGINS, AKC_ACTION
+) = range(14)
 
 
 # --- 3. РАБОТА С БАЗОЙ ДАННЫХ POSTGRESQL ---
@@ -311,7 +310,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ["❓ Помощь"]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    start_message = (f"Привет, {user.mention_html()}! �\n\nЯ бот для анализа сертификатов и скачивания видео.")
+    start_message = (f"Привет, {user.mention_html()}! 👋\n\nЯ бот для анализа сертификатов и скачивания видео.")
     await update.message.reply_html(start_message, reply_markup=reply_markup)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -349,7 +348,7 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if filesize > MAX_VIDEO_SIZE_BYTES:
             size_in_mb = filesize / 1024 / 1024
-            await msg.edit_text(f"❌ Видео '{title}' слишком большое ({size_in_mb:.1f} МБ)."); return ConversationHandler.END
+            await msg.edit_message_text(f"❌ Видео '{title}' слишком большое ({size_in_mb:.1f} МБ)."); return ConversationHandler.END
 
         context.user_data['youtube_url'] = url; context.user_data['youtube_title'] = title
         
@@ -480,8 +479,8 @@ async def akc_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def akc_use_defaults(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
     context.user_data['akc_form'] = context.user_data.get('akc_defaults', {})
-    await query.edit_message_text("Данные шапки применены.\n\nВведите **ФИО владельца сертификата**:", parse_mode='Markdown')
-    return AKC_CERT_OWNER
+    await query.edit_message_text("Данные шапки применены.\n\nТеперь, пожалуйста, **прикрепите файл сертификата** (.cer, .crt):", parse_mode='Markdown')
+    return AKC_AWAIT_CERTIFICATE
 
 async def akc_refill_defaults(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
@@ -507,17 +506,45 @@ async def akc_get_municipality(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     context.user_data['akc_form']['municipality'] = update.message.text
     save_akc_defaults(user_id, context.user_data['akc_form'])
-    await update.message.reply_text("Шапка заявки заполнена и сохранена.\n\nВведите **ФИО владельца сертификата**:", parse_mode='Markdown')
-    return AKC_CERT_OWNER
+    await update.message.reply_text("Шапка заявки заполнена и сохранена.\n\nТеперь, пожалуйста, **прикрепите файл сертификата** (.cer, .crt):", parse_mode='Markdown')
+    return AKC_AWAIT_CERTIFICATE
 
-async def akc_get_cert_owner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    fio = update.message.text
-    context.user_data['akc_form']['cert_owner'] = fio
-    context.user_data['akc_form']['cert_filename'] = fio + ".cer"
-    keyboard = [[InlineKeyboardButton("Руководитель", callback_data='role_Руководитель')], [InlineKeyboardButton("Бухгалтер", callback_data='role_Бухгалтер')], [InlineKeyboardButton("Специалист ГИС ГМП", callback_data='role_Специалист ГИС ГМП')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Выберите **роль субъекта**:", reply_markup=reply_markup, parse_mode='Markdown')
-    return AKC_ROLE
+async def akc_get_certificate_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    document = update.message.document
+    file_id = document.file_id
+    
+    try:
+        file_object = await context.bot.get_file(file_id)
+        file_buffer = io.BytesIO()
+        await file_object.download_to_memory(file_buffer)
+        
+        cert_bytes = file_buffer.getvalue() # Сохраняем байты для будущего архива
+        cert_data = get_certificate_info(cert_bytes)
+        
+        if not cert_data:
+            await update.message.reply_text("❌ Не удалось прочитать данные из сертификата. Убедитесь, что файл корректен, и попробуйте снова.")
+            return AKC_AWAIT_CERTIFICATE
+
+        context.user_data['akc_form']['cert_owner'] = cert_data['ФИО']
+        context.user_data['akc_form']['cert_serial'] = cert_data['Серийный номер']
+        context.user_data['akc_form']['cert_filename'] = document.file_name
+        context.user_data['akc_form']['cert_bytes'] = cert_bytes # Сохраняем сам файл
+        
+        await update.message.reply_text(f"✅ Сертификат для **{cert_data['ФИО']}** успешно обработан.", parse_mode='Markdown')
+        
+        keyboard = [[InlineKeyboardButton("Руководитель", callback_data='role_Руководитель')], [InlineKeyboardButton("Бухгалтер", callback_data='role_Бухгалтер')], [InlineKeyboardButton("Специалист ГИС ГМП", callback_data='role_Специалист ГИС ГМП')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("Выберите **роль субъекта**:", reply_markup=reply_markup, parse_mode='Markdown')
+        return AKC_ROLE
+        
+    except Exception as e:
+        logger.error(f"Ошибка при обработке файла сертификата для заявки: {e}", exc_info=True)
+        await update.message.reply_text("❌ Произошла ошибка при обработке файла. Пожалуйста, попробуйте снова.")
+        return AKC_AWAIT_CERTIFICATE
+
+async def akc_invalid_cert_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Пожалуйста, прикрепите именно файл сертификата, а не текст.")
+    return AKC_AWAIT_CERTIFICATE
 
 async def akc_get_role(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
@@ -530,12 +557,7 @@ async def akc_get_role(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 async def akc_get_citp_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
     citp_name = query.data.split('_')[1]; context.user_data['akc_form']['citp_name'] = citp_name
-    await query.edit_message_text(text=f"Выбрана система: {citp_name}.\n\nВведите **серийный номер сертификата**:", parse_mode='Markdown')
-    return AKC_CERT_SERIAL
-
-async def akc_get_cert_serial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['akc_form']['cert_serial'] = update.message.text
-    await update.message.reply_text("Введите **имена пользователей (логины)**, через запятую:", parse_mode='Markdown')
+    await query.edit_message_text(text=f"Выбрана система: {citp_name}.\n\nВведите **имена пользователей (логины)**, через запятую:", parse_mode='Markdown')
     return AKC_LOGINS
 
 async def akc_get_logins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -548,16 +570,41 @@ async def akc_get_logins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def akc_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
     action = query.data.split('_')[1]; context.user_data['akc_form']['action'] = action
-    await query.edit_message_text(text="Формирую DOCX файл...")
+    await query.edit_message_text(text="Формирую ZIP-архив...")
+    
     try:
         form_data = context.user_data['akc_form']
+        
+        # Создаем DOCX в памяти
         docx_buffer = create_akc_docx(form_data)
-        filename = f"Заявка_АЦК_{form_data.get('cert_owner', 'пользователь')}.docx"
-        await context.bot.send_document(chat_id=update.effective_chat.id, document=docx_buffer, filename=filename, caption="✅ Ваша заявка готова.")
+        docx_filename = f"Заявка_АЦК_{form_data.get('cert_owner', 'пользователь')}.docx"
+        
+        # Получаем сертификат из временного хранилища
+        cert_bytes = form_data.get('cert_bytes')
+        cert_filename = form_data.get('cert_filename', 'certificate.cer')
+
+        # Создаем ZIP в памяти
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w') as zip_file:
+            zip_file.writestr(docx_filename, docx_buffer.getvalue())
+            if cert_bytes:
+                zip_file.writestr(cert_filename, cert_bytes)
+        zip_buffer.seek(0)
+        
+        zip_filename = f"Заявка_и_сертификат_{form_data.get('cert_owner', 'пользователь')}.zip"
+        
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=zip_buffer,
+            filename=zip_filename,
+            caption="✅ Ваша заявка и сертификат в ZIP-архиве."
+        )
         await query.message.delete()
+        
     except Exception as e:
-        logger.error(f"Ошибка при создании или отправке DOCX заявки: {e}", exc_info=True)
-        await query.edit_message_text(text="❌ Произошла ошибка при создании файла заявки.")
+        logger.error(f"Ошибка при создании или отправке ZIP-архива: {e}", exc_info=True)
+        await query.edit_message_text(text="❌ Произошла ошибка при создании архива.")
+
     context.user_data.pop('akc_form', None)
     return ConversationHandler.END
 
@@ -569,13 +616,15 @@ async def main() -> None:
     init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
+    cancel_handler = MessageHandler(filters.Regex('^(📜 Сертификат|🎬 YouTube|📄 Заявка АЦК|⚙️ Настройки|❓ Помощь)$') & user_filter, cancel)
+    
     settings_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^⚙️ Настройки$') & user_filter, settings_entry)],
         states={
             CHOOSING_ACTION: [CallbackQueryHandler(prompt_for_days, pattern='^change_threshold$'), CallbackQueryHandler(end_conversation, pattern='^back_to_main$')],
             TYPING_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_days)],
         },
-        fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АЦК|❓ Помощь|🎬 YouTube)$'), cancel)],
+        fallbacks=[CommandHandler('start', start), cancel_handler],
     )
     youtube_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^🎬 YouTube$') & user_filter, youtube_entry)],
@@ -583,7 +632,7 @@ async def main() -> None:
             AWAITING_YOUTUBE_LINK: [MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_link), MessageHandler(filters.TEXT & ~filters.COMMAND, invalid_youtube_link)],
             CONFIRMING_DOWNLOAD: [CallbackQueryHandler(start_download_confirmed, pattern='^yt_confirm$'), CallbackQueryHandler(cancel_download, pattern='^yt_cancel$')]
         },
-        fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АЦК|⚙️ Настройки|❓ Помощь)$'), cancel)]
+        fallbacks=[CommandHandler('start', start), cancel_handler]
     )
     akc_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^📄 Заявка АЦК$') & user_filter, akc_start)],
@@ -593,14 +642,13 @@ async def main() -> None:
             AKC_ORG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_org_name)],
             AKC_INN_KPP: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_inn_kpp)],
             AKC_MUNICIPALITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_municipality)],
-            AKC_CERT_OWNER: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_cert_owner)],
+            AKC_AWAIT_CERTIFICATE: [MessageHandler(filters.Document.FileExtension(ALLOWED_EXTENSIONS), akc_get_certificate_file), MessageHandler(filters.TEXT & ~filters.COMMAND, akc_invalid_cert_file)],
             AKC_ROLE: [CallbackQueryHandler(akc_get_role, pattern='^role_')],
             AKC_CITP_NAME: [CallbackQueryHandler(akc_get_citp_name, pattern='^citp_')],
-            AKC_CERT_SERIAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_cert_serial)],
             AKC_LOGINS: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_logins)],
             AKC_ACTION: [CallbackQueryHandler(akc_finish, pattern='^action_')],
         },
-        fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|🎬 YouTube|⚙️ Настройки|❓ Помощь)$'), cancel)],
+        fallbacks=[CommandHandler('start', start), cancel_handler],
     )
     
     application.add_handler(settings_conv_handler)
