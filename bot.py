@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V2.7 - НАДЕЖНАЯ ОСТАНОВКА БОТА)
+#   ФАЙЛ: bot.py (V2.8 - КОРРЕКТНЫЙ ЗАПУСК/ОСТАНОВКА)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -311,7 +311,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ["❓ Помощь"]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    start_message = (f"Привет, {user.mention_html()}! 👋\n\nЯ бот для анализа сертификатов и скачивания видео.")
+    start_message = (f"Привет, {user.mention_html()}! �\n\nЯ бот для анализа сертификатов и скачивания видео.")
     await update.message.reply_html(start_message, reply_markup=reply_markup)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -636,3 +636,4 @@ async def main() -> None:
 # --- 7. ТОЧКА ВХОДА ---
 if __name__ == "__main__":
     asyncio.run(main())
+�
