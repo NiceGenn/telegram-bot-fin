@@ -6,3 +6,4 @@ fastapi
 uvicorn
 psycopg2-binary
 yt-dlp
+python-docx

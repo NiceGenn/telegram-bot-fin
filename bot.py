@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V2.1 - УБРАНА СТРОКА 'КОМУ')
+#   ФАЙЛ: bot.py (V2.2 - ГЕНЕРАЦИЯ DOCX ЗАЯВКИ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -15,6 +15,7 @@ import yt_dlp
 import telegram
 import uuid
 import time
+import docx # <<< НОВОЕ: Импорт для работы с .docx
 
 from telegram import Update, ReplyKeyboardMarkup, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -181,6 +182,75 @@ def _process_file_content(file_bytes: bytes, file_name: str) -> List[Dict[str, A
         cert_info = get_certificate_info(file_bytes)
         if cert_info: all_certs_data.append(cert_info)
     return all_certs_data
+
+# <<< НОВОЕ: Функция для создания DOCX файла в памяти >>>
+def create_akc_docx(form_data: dict) -> io.BytesIO:
+    """Создает DOCX файл заявки на основе собранных данных."""
+    doc = docx.Document()
+    # Устанавливаем стандартные поля для документа
+    sections = doc.sections
+    for section in sections:
+        section.top_margin = docx.shared.Cm(2)
+        section.bottom_margin = docx.shared.Cm(2)
+        section.left_margin = docx.shared.Cm(3)
+        section.right_margin = docx.shared.Cm(1.5)
+
+    # Шапка документа
+    p = doc.add_paragraph()
+    p.alignment = docx.enum.text.WD_ALIGN_PARAGRAPH.RIGHT
+    p.add_run("Приложение 5 к Регламенту взаимодействия\nминистерства финансов Амурской области и\nУчастников юридически значимого\nэлектронного документооборота")
+
+    doc.add_paragraph() # Пустая строка для отступа
+
+    p = doc.add_paragraph()
+    p.add_run("От кого: ").bold = True
+    p.add_run(form_data.get('sender_fio', ''))
+    p.add_run("\n(Ф.И.О. представителя учреждения)").italic = True
+    p.add_run(f"\n{form_data.get('org_name', '')}")
+    p.add_run("\n(наименование учреждения)").italic = True
+    p.add_run(f"\n{form_data.get('inn_kpp', '')}")
+    p.add_run("\n(ИНН/КПП)").italic = True
+    p.add_run(f"\n{form_data.get('municipality', '')}")
+    p.add_run("\n(наименование муниципального образования)").italic = True
+    p.add_run(f"\n{datetime.now().strftime('%d.%m.%Y')}")
+    p.add_run("\n(дата)").italic = True
+
+    doc.add_paragraph()
+
+    # Заголовок заявки
+    p = doc.add_paragraph()
+    p.alignment = docx.enum.text.WD_ALIGN_PARAGRAPH.CENTER
+    p.add_run("ЗАЯВКА\nна регистрацию пользователя ЦИТП").bold = True
+    
+    doc.add_paragraph()
+
+    # Табличная часть
+    table = doc.add_table(rows=2, cols=8)
+    table.style = 'Table Grid'
+    
+    headers = [
+        "Субъект ЭП", "Роль субъекта в ЦИТП", "Наименование ЦИТП", 
+        "(АЦК-Финансы, АЦК-Планирование)", "Серийный номер сертификата", 
+        "Имя файла сертификата", "Имя пользователя для входа в ЦИТП", "Действие"
+    ]
+    
+    for i, header_text in enumerate(headers):
+        table.cell(0, i).text = header_text
+
+    # Заполняем данные
+    table.cell(1, 0).text = form_data.get('cert_owner', '')
+    table.cell(1, 1).text = form_data.get('role', '')
+    table.cell(1, 2).text = "АЦК-Финансы"
+    table.cell(1, 4).text = form_data.get('cert_serial', '')
+    table.cell(1, 5).text = form_data.get('cert_filename', '')
+    table.cell(1, 6).text = form_data.get('logins', '')
+    table.cell(1, 7).text = form_data.get('action', '')
+
+    # Сохраняем документ в байтовый поток
+    doc_buffer = io.BytesIO()
+    doc.save(doc_buffer)
+    doc_buffer.seek(0)
+    return doc_buffer
 
 
 # --- 5. ОБРАБОТЧИКИ КОМАНД, КНОПОК И ДИАЛОГОВ ---
@@ -394,19 +464,31 @@ async def akc_get_logins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("Выберите **действие** с сертификатом:", reply_markup=reply_markup, parse_mode='Markdown')
     return AKC_ACTION
 
+# <<< ИЗМЕНЕНИЕ: Функция теперь создает и отправляет DOCX файл >>>
 async def akc_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
     action = query.data.split('_')[1]; context.user_data['akc_form']['action'] = action
-    form = context.user_data['akc_form']
-    # <<< ИЗМЕНЕНИЕ: Убрана строка "Кому:" >>>
-    final_text = (f"Тема: Заявка на регистрацию пользователя ЦИТП\n\n"
-                  f"От кого: {form['sender_fio']}\nУчреждение: {form['org_name']}\nИНН/КПП: {form['inn_kpp']}\n"
-                  f"Муниципальное образование: {form['municipality']}\nДата: {datetime.now().strftime('%d.%m.%Y')}\n\n"
-                  f"ЗАЯВКА на регистрацию пользователя ЦИТП\n\nПрошу выполнить следующее действие: **{form['action']}**\n\n"
-                  f"Данные:\n- Субъект ЭП: {form['cert_owner']}\n- Роль субъекта: {form['role']}\n- Наименование ЦИТП: АЦК-Финансы\n"
-                  f"- Серийный номер сертификата: {form['cert_serial']}\n- Имя файла сертификата: {form['cert_filename']}\n"
-                  f"- Имя пользователя для входа: {form['logins']}\n\n---------------------\nГотово! Скопируйте этот текст.")
-    await query.edit_message_text(text=final_text, parse_mode='Markdown')
+    
+    await query.edit_message_text(text="Формирую DOCX файл...")
+    
+    try:
+        form_data = context.user_data['akc_form']
+        docx_buffer = create_akc_docx(form_data)
+        
+        filename = f"Заявка_АКЦ_{form_data.get('cert_owner', 'пользователь')}.docx"
+        
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=docx_buffer,
+            filename=filename,
+            caption="✅ Ваша заявка готова."
+        )
+        await query.message.delete() # Удаляем сообщение с кнопками
+        
+    except Exception as e:
+        logger.error(f"Ошибка при создании или отправке DOCX заявки: {e}", exc_info=True)
+        await query.edit_message_text(text="❌ Произошла ошибка при создании файла заявки.")
+
     context.user_data.pop('akc_form', None)
     return ConversationHandler.END
 
