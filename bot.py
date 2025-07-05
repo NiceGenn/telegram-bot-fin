@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V2.4 - ПОЛНЫЙ ШАБЛОН DOCX)
+#   ФАЙЛ: bot.py (V2.5 - ИСПРАВЛЕНИЕ ГЕНЕРАЦИИ DOCX)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -64,7 +64,7 @@ YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(c
     CHOOSING_ACTION, TYPING_DAYS, AWAITING_YOUTUBE_LINK, CONFIRMING_DOWNLOAD,
     AKC_CONFIRM_DEFAULTS, AKC_SENDER_FIO, AKC_ORG_NAME, AKC_INN_KPP, AKC_MUNICIPALITY,
     AKC_AWAIT_CERTIFICATE, AKC_ROLE, AKC_CITP_NAME, AKC_LOGINS, AKC_ACTION
-) = range(14)
+) = range(15)
 
 
 # --- 3. РАБОТА С БАЗОЙ ДАННЫХ POSTGRESQL ---
@@ -232,20 +232,18 @@ def _process_file_content(file_bytes: bytes, file_name: str) -> List[Dict[str, A
     return all_certs_data
 
 def create_akc_docx(form_data: dict) -> io.BytesIO:
-    """Создает DOCX файл заявки, точно повторяя шаблон."""
     doc = docx.Document()
-    # --- Настройка страницы ---
     section = doc.sections[0]
     section.orientation = WD_ORIENT.LANDSCAPE
     new_width, new_height = section.page_height, section.page_width
     section.page_width = new_width
     section.page_height = new_height
+    
     section.top_margin = Cm(2)
     section.bottom_margin = Cm(2)
     section.left_margin = Cm(3)
     section.right_margin = Cm(1.5)
 
-    # --- Верхний правый блок ---
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     run = p.add_run("Приложение 5 к Регламенту взаимодействия\nминистерства финансов Амурской области и\nУчастников юридически значимого\nэлектронного документооборота")
@@ -255,7 +253,6 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
 
     doc.add_paragraph() 
 
-    # --- Блок "От кого" ---
     p = doc.add_paragraph()
     run = p.add_run("От кого: ")
     run.bold = True
@@ -308,7 +305,6 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
 
     doc.add_paragraph()
 
-    # --- Заголовок заявки ---
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = p.add_run("ЗАЯВКА\nна регистрацию пользователя ЦИТП")
@@ -318,7 +314,6 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
     
     doc.add_paragraph()
 
-    # --- Основная таблица ---
     table = doc.add_table(rows=2, cols=7)
     table.style = 'Table Grid'
     
@@ -326,7 +321,7 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
         "Субъект ЭП", "Роль субъекта в ЦИТП (Руководитель, Бухгалтер, Специалист ГИС ГМП)", 
         "Наименование ЦИТП (АЦК-Финансы, АЦК-Планирование)", 
         "Серийный номер сертификата", "Имя файла сертификата", 
-        "Имя пользователя для входа в ЦИТП, под которым производится подписание", 
+        "Имя пользователя для входа в ЦИТП...", 
         "Действие(добавить, удалить, заменить, заблокировать)"
     ]
     
@@ -335,7 +330,6 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
         cell.paragraphs[0].runs[0].font.bold = True
         cell.paragraphs[0].runs[0].font.size = Pt(10)
 
-    # Заполняем данные
     table.cell(1, 0).text = form_data.get('cert_owner', '')
     table.cell(1, 1).text = form_data.get('role', '')
     table.cell(1, 2).text = form_data.get('citp_name', '')
@@ -349,7 +343,6 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
 
     doc.add_paragraph()
 
-    # --- Нижний блок подписей ---
     footer_table = doc.add_table(rows=4, cols=3)
     
     footer_table.cell(0, 0).text = "№ Записи в электронном журнале:"
@@ -366,12 +359,16 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
     footer_table.cell(3, 1).text = "М.П."
     footer_table.cell(3, 2).text = "Номер телефона или e-mail"
 
+    # <<< ИСПРАВЛЕНИЕ: Применяем стиль только к непустым ячейкам >>>
     for row in footer_table.rows:
         for cell in row.cells:
-            cell.paragraphs[0].runs[0].font.name = 'Times New Roman'
-            cell.paragraphs[0].runs[0].font.size = Pt(12)
+            # Проверяем, что в ячейке есть текст, прежде чем его форматировать
+            if cell.text:
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        run.font.name = 'Times New Roman'
+                        run.font.size = Pt(12)
 
-    # Сохраняем документ в байтовый поток
     doc_buffer = io.BytesIO()
     doc.save(doc_buffer)
     doc_buffer.seek(0)
