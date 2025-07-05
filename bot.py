@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V2.6 - ФОРМАТИРОВАНИЕ ШАПКИ ЗАЯВКИ)
+#   ФАЙЛ: bot.py (V2.7 - ИСПРАВЛЕНИЕ СОСТОЯНИЙ ДИАЛОГА)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -64,7 +64,7 @@ YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(c
     CHOOSING_ACTION, TYPING_DAYS, AWAITING_YOUTUBE_LINK, CONFIRMING_DOWNLOAD,
     AKC_CONFIRM_DEFAULTS, AKC_SENDER_FIO, AKC_ORG_NAME, AKC_INN_KPP, AKC_MUNICIPALITY,
     AKC_AWAIT_CERTIFICATE, AKC_ROLE, AKC_CITP_NAME, AKC_LOGINS, AKC_ACTION
-) = range(15)
+) = range(14)
 
 
 # --- 3. РАБОТА С БАЗОЙ ДАННЫХ POSTGRESQL ---
