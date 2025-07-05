@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V2.2 - ГЕНЕРАЦИЯ DOCX ЗАЯВКИ)
+#   ФАЙЛ: bot.py (V2.6 - УЛУЧШЕННАЯ ОТМЕНА ДИАЛОГОВ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -15,7 +15,8 @@ import yt_dlp
 import telegram
 import uuid
 import time
-import docx # <<< НОВОЕ: Импорт для работы с .docx
+import docx
+from docx.enum.section import WD_ORIENT
 
 from telegram import Update, ReplyKeyboardMarkup, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -59,10 +60,10 @@ YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(c
 # Состояния для диалогов
 (
     CHOOSING_ACTION, TYPING_DAYS, AWAITING_YOUTUBE_LINK, CONFIRMING_DOWNLOAD,
-    AKC_SENDER_FIO, AKC_ORG_NAME, AKC_INN_KPP, AKC_MUNICIPALITY,
-    AKC_CERT_OWNER, AKC_ROLE, AKC_CERT_SERIAL, AKC_CERT_FILENAME,
+    AKC_CONFIRM_DEFAULTS, AKC_SENDER_FIO, AKC_ORG_NAME, AKC_INN_KPP, AKC_MUNICIPALITY,
+    AKC_CERT_OWNER, AKC_ROLE, AKC_CITP_NAME, AKC_CERT_SERIAL,
     AKC_LOGINS, AKC_ACTION
-) = range(14)
+) = range(15)
 
 
 # --- 3. РАБОТА С БАЗОЙ ДАННЫХ POSTGRESQL ---
@@ -80,6 +81,15 @@ def init_database():
     try:
         with conn.cursor() as cursor:
             cursor.execute('CREATE TABLE IF NOT EXISTS user_settings (user_id BIGINT PRIMARY KEY, threshold INTEGER NOT NULL)')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS akc_sender_defaults (
+                    user_id BIGINT PRIMARY KEY,
+                    sender_fio TEXT NOT NULL,
+                    org_name TEXT NOT NULL,
+                    inn_kpp TEXT NOT NULL,
+                    municipality TEXT NOT NULL
+                )
+            ''')
         conn.commit()
         logger.info("База данных PostgreSQL успешно инициализирована.")
     except Exception as e:
@@ -116,6 +126,43 @@ async def get_user_threshold(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
         context.user_data['threshold'] = threshold_from_db
         return threshold_from_db
     return EXPIRATION_THRESHOLD_DAYS
+
+def save_akc_defaults(user_id: int, form_data: dict):
+    conn = get_db_connection()
+    if not conn: return
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO akc_sender_defaults (user_id, sender_fio, org_name, inn_kpp, municipality) "
+                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (user_id) DO UPDATE SET "
+                "sender_fio = EXCLUDED.sender_fio, org_name = EXCLUDED.org_name, "
+                "inn_kpp = EXCLUDED.inn_kpp, municipality = EXCLUDED.municipality;",
+                (user_id, form_data['sender_fio'], form_data['org_name'], form_data['inn_kpp'], form_data['municipality'])
+            )
+        conn.commit()
+        logger.info(f"Шаблон заявки для пользователя {user_id} сохранен.")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении шаблона заявки для {user_id}: {e}")
+    finally:
+        if conn: conn.close()
+
+def load_akc_defaults(user_id: int) -> Optional[Dict[str, str]]:
+    conn = get_db_connection()
+    if not conn: return None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT sender_fio, org_name, inn_kpp, municipality FROM akc_sender_defaults WHERE user_id = %s", (user_id,))
+            result = cursor.fetchone()
+        if result:
+            return {
+                'sender_fio': result[0],
+                'org_name': result[1],
+                'inn_kpp': result[2],
+                'municipality': result[3]
+            }
+        return None
+    finally:
+        if conn: conn.close()
 
 
 # --- 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
@@ -183,24 +230,24 @@ def _process_file_content(file_bytes: bytes, file_name: str) -> List[Dict[str, A
         if cert_info: all_certs_data.append(cert_info)
     return all_certs_data
 
-# <<< НОВОЕ: Функция для создания DOCX файла в памяти >>>
 def create_akc_docx(form_data: dict) -> io.BytesIO:
-    """Создает DOCX файл заявки на основе собранных данных."""
     doc = docx.Document()
-    # Устанавливаем стандартные поля для документа
-    sections = doc.sections
-    for section in sections:
-        section.top_margin = docx.shared.Cm(2)
-        section.bottom_margin = docx.shared.Cm(2)
-        section.left_margin = docx.shared.Cm(3)
-        section.right_margin = docx.shared.Cm(1.5)
+    section = doc.sections[0]
+    section.orientation = WD_ORIENT.LANDSCAPE
+    new_width, new_height = section.page_height, section.page_width
+    section.page_width = new_width
+    section.page_height = new_height
+    
+    section.top_margin = docx.shared.Cm(2)
+    section.bottom_margin = docx.shared.Cm(2)
+    section.left_margin = docx.shared.Cm(3)
+    section.right_margin = docx.shared.Cm(1.5)
 
-    # Шапка документа
     p = doc.add_paragraph()
     p.alignment = docx.enum.text.WD_ALIGN_PARAGRAPH.RIGHT
     p.add_run("Приложение 5 к Регламенту взаимодействия\nминистерства финансов Амурской области и\nУчастников юридически значимого\nэлектронного документооборота")
 
-    doc.add_paragraph() # Пустая строка для отступа
+    doc.add_paragraph() 
 
     p = doc.add_paragraph()
     p.add_run("От кого: ").bold = True
@@ -217,36 +264,34 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
 
     doc.add_paragraph()
 
-    # Заголовок заявки
     p = doc.add_paragraph()
     p.alignment = docx.enum.text.WD_ALIGN_PARAGRAPH.CENTER
     p.add_run("ЗАЯВКА\nна регистрацию пользователя ЦИТП").bold = True
     
     doc.add_paragraph()
 
-    # Табличная часть
-    table = doc.add_table(rows=2, cols=8)
+    table = doc.add_table(rows=2, cols=7)
     table.style = 'Table Grid'
     
     headers = [
-        "Субъект ЭП", "Роль субъекта в ЦИТП", "Наименование ЦИТП", 
-        "(АЦК-Финансы, АЦК-Планирование)", "Серийный номер сертификата", 
-        "Имя файла сертификата", "Имя пользователя для входа в ЦИТП", "Действие"
+        "Субъект ЭП", "Роль субъекта в ЦИТП (Руководитель, Бухгалтер, Специалист ГИС ГМП)", 
+        "Наименование ЦИТП (АЦК-Финансы, АЦК-Планирование)", 
+        "Серийный номер сертификата", "Имя файла сертификата", 
+        "Имя пользователя для входа в ЦИТП...", 
+        "Действие(добавить, удалить, заменить, заблокировать)"
     ]
     
     for i, header_text in enumerate(headers):
         table.cell(0, i).text = header_text
 
-    # Заполняем данные
     table.cell(1, 0).text = form_data.get('cert_owner', '')
     table.cell(1, 1).text = form_data.get('role', '')
-    table.cell(1, 2).text = "АЦК-Финансы"
-    table.cell(1, 4).text = form_data.get('cert_serial', '')
-    table.cell(1, 5).text = form_data.get('cert_filename', '')
-    table.cell(1, 6).text = form_data.get('logins', '')
-    table.cell(1, 7).text = form_data.get('action', '')
+    table.cell(1, 2).text = form_data.get('citp_name', '')
+    table.cell(1, 3).text = form_data.get('cert_serial', '')
+    table.cell(1, 4).text = form_data.get('cert_filename', '')
+    table.cell(1, 5).text = form_data.get('logins', '')
+    table.cell(1, 6).text = form_data.get('action', '')
 
-    # Сохраняем документ в байтовый поток
     doc_buffer = io.BytesIO()
     doc.save(doc_buffer)
     doc_buffer.seek(0)
@@ -262,7 +307,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     keyboard = [
         ["📜 Сертификат", "🎬 YouTube"], 
-        ["📄 Заявка АКЦ", "⚙️ Настройки"], 
+        ["📄 Заявка АЦК", "⚙️ Настройки"], 
         ["❓ Помощь"]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -410,8 +455,37 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 async def akc_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
     context.user_data['akc_form'] = {}
-    await update.message.reply_text("Начинаем формирование заявки АКЦ.\n\nВведите **ФИО представителя учреждения**:", parse_mode='Markdown')
+    
+    defaults = load_akc_defaults(user_id)
+    if defaults:
+        context.user_data['akc_defaults'] = defaults
+        text = (
+            "Найдены сохраненные данные для шапки заявки:\n\n"
+            f"**От кого:** {defaults['sender_fio']}\n"
+            f"**Учреждение:** {defaults['org_name']}\n"
+            f"**ИНН/КПП:** {defaults['inn_kpp']}\n"
+            f"**МО:** {defaults['municipality']}\n\n"
+            "Использовать эти данные?"
+        )
+        keyboard = [[InlineKeyboardButton("✅ Да, использовать", callback_data='akc_use_defaults')], [InlineKeyboardButton("✏️ Заполнить заново", callback_data='akc_refill')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        return AKC_CONFIRM_DEFAULTS
+    else:
+        await update.message.reply_text("Начинаем формирование заявки АЦК.\n\nВведите **ФИО представителя учреждения**:", parse_mode='Markdown')
+        return AKC_SENDER_FIO
+
+async def akc_use_defaults(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query; await query.answer()
+    context.user_data['akc_form'] = context.user_data.get('akc_defaults', {})
+    await query.edit_message_text("Данные шапки применены.\n\nВведите **ФИО владельца сертификата**:", parse_mode='Markdown')
+    return AKC_CERT_OWNER
+
+async def akc_refill_defaults(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query; await query.answer()
+    await query.edit_message_text("Хорошо, давайте заполним данные заново.\n\nВведите **ФИО представителя учреждения**:", parse_mode='Markdown')
     return AKC_SENDER_FIO
 
 async def akc_get_sender_fio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -430,12 +504,16 @@ async def akc_get_inn_kpp(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return AKC_MUNICIPALITY
 
 async def akc_get_municipality(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
     context.user_data['akc_form']['municipality'] = update.message.text
-    await update.message.reply_text("Введите **ФИО владельца сертификата**:", parse_mode='Markdown')
+    save_akc_defaults(user_id, context.user_data['akc_form'])
+    await update.message.reply_text("Шапка заявки заполнена и сохранена.\n\nВведите **ФИО владельца сертификата**:", parse_mode='Markdown')
     return AKC_CERT_OWNER
 
 async def akc_get_cert_owner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['akc_form']['cert_owner'] = update.message.text
+    fio = update.message.text
+    context.user_data['akc_form']['cert_owner'] = fio
+    context.user_data['akc_form']['cert_filename'] = fio + ".cer"
     keyboard = [[InlineKeyboardButton("Руководитель", callback_data='role_Руководитель')], [InlineKeyboardButton("Бухгалтер", callback_data='role_Бухгалтер')], [InlineKeyboardButton("Специалист ГИС ГМП", callback_data='role_Специалист ГИС ГМП')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Выберите **роль субъекта**:", reply_markup=reply_markup, parse_mode='Markdown')
@@ -444,16 +522,19 @@ async def akc_get_cert_owner(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def akc_get_role(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
     role = query.data.split('_')[1]; context.user_data['akc_form']['role'] = role
-    await query.edit_message_text(text=f"Выбрана роль: {role}.\n\nВведите **серийный номер сертификата**:", parse_mode='Markdown')
+    keyboard = [[InlineKeyboardButton("АЦК-Финансы", callback_data='citp_АЦК-Финансы')], [InlineKeyboardButton("АЦК-Планирование", callback_data='citp_АЦК-Планирование')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(text=f"Выбрана роль: {role}.\n\nВыберите **Наименование ЦИТП**:", reply_markup=reply_markup, parse_mode='Markdown')
+    return AKC_CITP_NAME
+
+async def akc_get_citp_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query; await query.answer()
+    citp_name = query.data.split('_')[1]; context.user_data['akc_form']['citp_name'] = citp_name
+    await query.edit_message_text(text=f"Выбрана система: {citp_name}.\n\nВведите **серийный номер сертификата**:", parse_mode='Markdown')
     return AKC_CERT_SERIAL
 
 async def akc_get_cert_serial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['akc_form']['cert_serial'] = update.message.text
-    await update.message.reply_text("Введите **имя файла сертификата**:", parse_mode='Markdown')
-    return AKC_CERT_FILENAME
-
-async def akc_get_cert_filename(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['akc_form']['cert_filename'] = update.message.text
     await update.message.reply_text("Введите **имена пользователей (логины)**, через запятую:", parse_mode='Markdown')
     return AKC_LOGINS
 
@@ -464,31 +545,19 @@ async def akc_get_logins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("Выберите **действие** с сертификатом:", reply_markup=reply_markup, parse_mode='Markdown')
     return AKC_ACTION
 
-# <<< ИЗМЕНЕНИЕ: Функция теперь создает и отправляет DOCX файл >>>
 async def akc_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
     action = query.data.split('_')[1]; context.user_data['akc_form']['action'] = action
-    
     await query.edit_message_text(text="Формирую DOCX файл...")
-    
     try:
         form_data = context.user_data['akc_form']
         docx_buffer = create_akc_docx(form_data)
-        
-        filename = f"Заявка_АКЦ_{form_data.get('cert_owner', 'пользователь')}.docx"
-        
-        await context.bot.send_document(
-            chat_id=update.effective_chat.id,
-            document=docx_buffer,
-            filename=filename,
-            caption="✅ Ваша заявка готова."
-        )
-        await query.message.delete() # Удаляем сообщение с кнопками
-        
+        filename = f"Заявка_АЦК_{form_data.get('cert_owner', 'пользователь')}.docx"
+        await context.bot.send_document(chat_id=update.effective_chat.id, document=docx_buffer, filename=filename, caption="✅ Ваша заявка готова.")
+        await query.message.delete()
     except Exception as e:
         logger.error(f"Ошибка при создании или отправке DOCX заявки: {e}", exc_info=True)
         await query.edit_message_text(text="❌ Произошла ошибка при создании файла заявки.")
-
     context.user_data.pop('akc_form', None)
     return ConversationHandler.END
 
@@ -506,7 +575,7 @@ async def main() -> None:
             CHOOSING_ACTION: [CallbackQueryHandler(prompt_for_days, pattern='^change_threshold$'), CallbackQueryHandler(end_conversation, pattern='^back_to_main$')],
             TYPING_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_days)],
         },
-        fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АКЦ|❓ Помощь|🎬 YouTube)$'), cancel)],
+        fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АЦК|❓ Помощь|🎬 YouTube)$'), cancel)],
     )
     youtube_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^🎬 YouTube$') & user_filter, youtube_entry)],
@@ -514,23 +583,24 @@ async def main() -> None:
             AWAITING_YOUTUBE_LINK: [MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_link), MessageHandler(filters.TEXT & ~filters.COMMAND, invalid_youtube_link)],
             CONFIRMING_DOWNLOAD: [CallbackQueryHandler(start_download_confirmed, pattern='^yt_confirm$'), CallbackQueryHandler(cancel_download, pattern='^yt_cancel$')]
         },
-        fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АКЦ|⚙️ Настройки|❓ Помощь)$'), cancel)]
+        fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|📄 Заявка АЦК|⚙️ Настройки|❓ Помощь)$'), cancel)]
     )
     akc_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^📄 Заявка АКЦ$') & user_filter, akc_start)],
+        entry_points=[MessageHandler(filters.Regex('^📄 Заявка АЦК$') & user_filter, akc_start)],
         states={
+            AKC_CONFIRM_DEFAULTS: [CallbackQueryHandler(akc_use_defaults, pattern='^akc_use_defaults$'), CallbackQueryHandler(akc_refill_defaults, pattern='^akc_refill$')],
             AKC_SENDER_FIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_sender_fio)],
             AKC_ORG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_org_name)],
             AKC_INN_KPP: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_inn_kpp)],
             AKC_MUNICIPALITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_municipality)],
             AKC_CERT_OWNER: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_cert_owner)],
             AKC_ROLE: [CallbackQueryHandler(akc_get_role, pattern='^role_')],
+            AKC_CITP_NAME: [CallbackQueryHandler(akc_get_citp_name, pattern='^citp_')],
             AKC_CERT_SERIAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_cert_serial)],
-            AKC_CERT_FILENAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_cert_filename)],
             AKC_LOGINS: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_logins)],
             AKC_ACTION: [CallbackQueryHandler(akc_finish, pattern='^action_')],
         },
-        fallbacks=[CommandHandler('start', start)],
+        fallbacks=[CommandHandler('start', start), MessageHandler(filters.Regex('^(📜 Сертификат|🎬 YouTube|⚙️ Настройки|❓ Помощь)$'), cancel)],
     )
     
     application.add_handler(settings_conv_handler)
