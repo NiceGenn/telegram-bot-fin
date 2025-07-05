@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V2.5 - ИСПРАВЛЕНИЕ ГЕНЕРАЦИИ DOCX)
+#   ФАЙЛ: bot.py (V2.6 - ФОРМАТИРОВАНИЕ ШАПКИ ЗАЯВКИ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -253,55 +253,40 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
 
     doc.add_paragraph() 
 
-    p = doc.add_paragraph()
-    run = p.add_run("От кого: ")
-    run.bold = True
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(12)
-    run = p.add_run(form_data.get('sender_fio', ''))
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(12)
+    header_table = doc.add_table(rows=5, cols=2)
     
-    run = p.add_run("\n(Ф.И.О. представителя учреждения)")
-    run.italic = True
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-    
-    run = p.add_run(f"\n{form_data.get('org_name', '')}")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(12)
+    header_data = [
+        ("От кого:", form_data.get('sender_fio', '')),
+        ("(Ф.И.О. представителя учреждения)", form_data.get('org_name', '')),
+        ("(наименование учреждения)", form_data.get('inn_kpp', '')),
+        ("(ИНН/КПП)", form_data.get('municipality', '')),
+        ("(наименование муниципального образования)", datetime.now().strftime('%d.%m.%Y')),
+    ]
 
-    run = p.add_run("\n(наименование учреждения)")
-    run.italic = True
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
+    for i, (label, value) in enumerate(header_data):
+        left_cell = header_table.cell(i, 0)
+        left_p = left_cell.paragraphs[0]
+        left_run = left_p.add_run(label)
+        left_run.italic = True
+        left_run.font.name = 'Times New Roman'
+        left_run.font.size = Pt(10)
+        left_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
-    run = p.add_run(f"\n{form_data.get('inn_kpp', '')}")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(12)
-
-    run = p.add_run("\n(ИНН/КПП)")
-    run.italic = True
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-
-    run = p.add_run(f"\n{form_data.get('municipality', '')}")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(12)
-
-    run = p.add_run("\n(наименование муниципального образования)")
-    run.italic = True
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
-
-    run = p.add_run(f"\n{datetime.now().strftime('%d.%m.%Y')}")
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(12)
-
-    run = p.add_run("\n(дата)")
-    run.italic = True
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(10)
+        right_cell = header_table.cell(i, 1)
+        right_p = right_cell.paragraphs[0]
+        right_run = right_p.add_run(value)
+        right_run.font.name = 'Times New Roman'
+        right_run.font.size = Pt(12)
+        if i == 0:
+            right_p.text = ""
+            run_bold = right_p.add_run("От кого: ")
+            run_bold.bold = True
+            run_bold.font.name = 'Times New Roman'
+            run_bold.font.size = Pt(12)
+            run_normal = right_p.add_run(value)
+            run_normal.font.name = 'Times New Roman'
+            run_normal.font.size = Pt(12)
+            left_cell.text = ""
 
     doc.add_paragraph()
 
@@ -321,7 +306,7 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
         "Субъект ЭП", "Роль субъекта в ЦИТП (Руководитель, Бухгалтер, Специалист ГИС ГМП)", 
         "Наименование ЦИТП (АЦК-Финансы, АЦК-Планирование)", 
         "Серийный номер сертификата", "Имя файла сертификата", 
-        "Имя пользователя для входа в ЦИТП...", 
+        "Имя пользователя для входа в ЦИТП, под которым производится подписание", 
         "Действие(добавить, удалить, заменить, заблокировать)"
     ]
     
@@ -359,10 +344,8 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
     footer_table.cell(3, 1).text = "М.П."
     footer_table.cell(3, 2).text = "Номер телефона или e-mail"
 
-    # <<< ИСПРАВЛЕНИЕ: Применяем стиль только к непустым ячейкам >>>
     for row in footer_table.rows:
         for cell in row.cells:
-            # Проверяем, что в ячейке есть текст, прежде чем его форматировать
             if cell.text:
                 for paragraph in cell.paragraphs:
                     for run in paragraph.runs:
