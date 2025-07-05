@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V3.2 - ИСПРАВЛЕНИЕ ФИЛЬТРА В ДИАЛОГЕ)
+#   ФАЙЛ: bot.py (V2.4 - ПОЛНЫЙ ШАБЛОН DOCX)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -17,6 +17,8 @@ import uuid
 import time
 import docx
 from docx.enum.section import WD_ORIENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Cm, Pt
 
 from telegram import Update, ReplyKeyboardMarkup, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -230,45 +232,93 @@ def _process_file_content(file_bytes: bytes, file_name: str) -> List[Dict[str, A
     return all_certs_data
 
 def create_akc_docx(form_data: dict) -> io.BytesIO:
+    """Создает DOCX файл заявки, точно повторяя шаблон."""
     doc = docx.Document()
+    # --- Настройка страницы ---
     section = doc.sections[0]
     section.orientation = WD_ORIENT.LANDSCAPE
     new_width, new_height = section.page_height, section.page_width
     section.page_width = new_width
     section.page_height = new_height
-    
-    section.top_margin = docx.shared.Cm(2)
-    section.bottom_margin = docx.shared.Cm(2)
-    section.left_margin = docx.shared.Cm(3)
-    section.right_margin = docx.shared.Cm(1.5)
+    section.top_margin = Cm(2)
+    section.bottom_margin = Cm(2)
+    section.left_margin = Cm(3)
+    section.right_margin = Cm(1.5)
 
+    # --- Верхний правый блок ---
     p = doc.add_paragraph()
-    p.alignment = docx.enum.text.WD_ALIGN_PARAGRAPH.RIGHT
-    p.add_run("Приложение 5 к Регламенту взаимодействия\nминистерства финансов Амурской области и\nУчастников юридически значимого\nэлектронного документооборота")
+    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    run = p.add_run("Приложение 5 к Регламенту взаимодействия\nминистерства финансов Амурской области и\nУчастников юридически значимого\nэлектронного документооборота")
+    font = run.font
+    font.name = 'Times New Roman'
+    font.size = Pt(12)
 
     doc.add_paragraph() 
 
+    # --- Блок "От кого" ---
     p = doc.add_paragraph()
-    p.add_run("От кого: ").bold = True
-    p.add_run(form_data.get('sender_fio', ''))
-    p.add_run("\n(Ф.И.О. представителя учреждения)").italic = True
-    p.add_run(f"\n{form_data.get('org_name', '')}")
-    p.add_run("\n(наименование учреждения)").italic = True
-    p.add_run(f"\n{form_data.get('inn_kpp', '')}")
-    p.add_run("\n(ИНН/КПП)").italic = True
-    p.add_run(f"\n{form_data.get('municipality', '')}")
-    p.add_run("\n(наименование муниципального образования)").italic = True
-    p.add_run(f"\n{datetime.now().strftime('%d.%m.%Y')}")
-    p.add_run("\n(дата)").italic = True
+    run = p.add_run("От кого: ")
+    run.bold = True
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(12)
+    run = p.add_run(form_data.get('sender_fio', ''))
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(12)
+    
+    run = p.add_run("\n(Ф.И.О. представителя учреждения)")
+    run.italic = True
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(10)
+    
+    run = p.add_run(f"\n{form_data.get('org_name', '')}")
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(12)
+
+    run = p.add_run("\n(наименование учреждения)")
+    run.italic = True
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(10)
+
+    run = p.add_run(f"\n{form_data.get('inn_kpp', '')}")
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(12)
+
+    run = p.add_run("\n(ИНН/КПП)")
+    run.italic = True
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(10)
+
+    run = p.add_run(f"\n{form_data.get('municipality', '')}")
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(12)
+
+    run = p.add_run("\n(наименование муниципального образования)")
+    run.italic = True
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(10)
+
+    run = p.add_run(f"\n{datetime.now().strftime('%d.%m.%Y')}")
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(12)
+
+    run = p.add_run("\n(дата)")
+    run.italic = True
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(10)
 
     doc.add_paragraph()
 
+    # --- Заголовок заявки ---
     p = doc.add_paragraph()
-    p.alignment = docx.enum.text.WD_ALIGN_PARAGRAPH.CENTER
-    p.add_run("ЗАЯВКА\nна регистрацию пользователя ЦИТП").bold = True
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p.add_run("ЗАЯВКА\nна регистрацию пользователя ЦИТП")
+    run.bold = True
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(12)
     
     doc.add_paragraph()
 
+    # --- Основная таблица ---
     table = doc.add_table(rows=2, cols=7)
     table.style = 'Table Grid'
     
@@ -276,13 +326,16 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
         "Субъект ЭП", "Роль субъекта в ЦИТП (Руководитель, Бухгалтер, Специалист ГИС ГМП)", 
         "Наименование ЦИТП (АЦК-Финансы, АЦК-Планирование)", 
         "Серийный номер сертификата", "Имя файла сертификата", 
-        "Имя пользователя для входа в ЦИТП...", 
+        "Имя пользователя для входа в ЦИТП, под которым производится подписание", 
         "Действие(добавить, удалить, заменить, заблокировать)"
     ]
     
-    for i, header_text in enumerate(headers):
-        table.cell(0, i).text = header_text
+    for i, cell in enumerate(table.rows[0].cells):
+        cell.text = headers[i]
+        cell.paragraphs[0].runs[0].font.bold = True
+        cell.paragraphs[0].runs[0].font.size = Pt(10)
 
+    # Заполняем данные
     table.cell(1, 0).text = form_data.get('cert_owner', '')
     table.cell(1, 1).text = form_data.get('role', '')
     table.cell(1, 2).text = form_data.get('citp_name', '')
@@ -291,6 +344,34 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
     table.cell(1, 5).text = form_data.get('logins', '')
     table.cell(1, 6).text = form_data.get('action', '')
 
+    for cell in table.rows[1].cells:
+        cell.paragraphs[0].runs[0].font.size = Pt(10)
+
+    doc.add_paragraph()
+
+    # --- Нижний блок подписей ---
+    footer_table = doc.add_table(rows=4, cols=3)
+    
+    footer_table.cell(0, 0).text = "№ Записи в электронном журнале:"
+    footer_table.cell(0, 1).text = "Статус:  выполнено/отказано"
+    
+    footer_table.cell(1, 0).text = "Заведение пользователя:"
+    footer_table.cell(1, 1).text = "Подпись представителя учреждения"
+    footer_table.cell(1, 2).text = "Дата"
+    
+    footer_table.cell(2, 0).text = "Дата:"
+    footer_table.cell(2, 1).text = "Исполнитель:"
+    
+    footer_table.cell(3, 0).text = "Установка СКП ЭП"
+    footer_table.cell(3, 1).text = "М.П."
+    footer_table.cell(3, 2).text = "Номер телефона или e-mail"
+
+    for row in footer_table.rows:
+        for cell in row.cells:
+            cell.paragraphs[0].runs[0].font.name = 'Times New Roman'
+            cell.paragraphs[0].runs[0].font.size = Pt(12)
+
+    # Сохраняем документ в байтовый поток
     doc_buffer = io.BytesIO()
     doc.save(doc_buffer)
     doc_buffer.seek(0)
@@ -348,7 +429,7 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if filesize > MAX_VIDEO_SIZE_BYTES:
             size_in_mb = filesize / 1024 / 1024
-            await msg.edit_message_text(f"❌ Видео '{title}' слишком большое ({size_in_mb:.1f} МБ)."); return ConversationHandler.END
+            await msg.edit_text(f"❌ Видео '{title}' слишком большое ({size_in_mb:.1f} МБ)."); return ConversationHandler.END
 
         context.user_data['youtube_url'] = url; context.user_data['youtube_title'] = title
         
