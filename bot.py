@@ -636,4 +636,3 @@ async def main() -> None:
 # --- 7. ТОЧКА ВХОДА ---
 if __name__ == "__main__":
     asyncio.run(main())
-�
