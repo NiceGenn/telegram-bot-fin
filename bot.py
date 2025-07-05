@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V3.1 - ЗАЯВКА И СЕРТИФИКАТ В ZIP-АРХИВЕ)
+#   ФАЙЛ: bot.py (V3.2 - ИСПРАВЛЕНИЕ ФИЛЬТРА В ДИАЛОГЕ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -348,7 +348,7 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if filesize > MAX_VIDEO_SIZE_BYTES:
             size_in_mb = filesize / 1024 / 1024
-            await msg.edit_message_text(f"❌ Видео '{title}' слишком большое ({size_in_mb:.1f} МБ)."); return ConversationHandler.END
+            await msg.edit_text(f"❌ Видео '{title}' слишком большое ({size_in_mb:.1f} МБ)."); return ConversationHandler.END
 
         context.user_data['youtube_url'] = url; context.user_data['youtube_title'] = title
         
@@ -518,17 +518,17 @@ async def akc_get_certificate_file(update: Update, context: ContextTypes.DEFAULT
         file_buffer = io.BytesIO()
         await file_object.download_to_memory(file_buffer)
         
-        cert_bytes = file_buffer.getvalue() # Сохраняем байты для будущего архива
+        cert_bytes = file_buffer.getvalue()
         cert_data = get_certificate_info(cert_bytes)
         
         if not cert_data:
-            await update.message.reply_text("❌ Не удалось прочитать данные из сертификата. Убедитесь, что файл корректен, и попробуйте снова.")
+            await update.message.reply_text("❌ Не удалось прочитать данные из сертификата. Попробуйте снова.")
             return AKC_AWAIT_CERTIFICATE
 
         context.user_data['akc_form']['cert_owner'] = cert_data['ФИО']
         context.user_data['akc_form']['cert_serial'] = cert_data['Серийный номер']
         context.user_data['akc_form']['cert_filename'] = document.file_name
-        context.user_data['akc_form']['cert_bytes'] = cert_bytes # Сохраняем сам файл
+        context.user_data['akc_form']['cert_bytes'] = cert_bytes
         
         await update.message.reply_text(f"✅ Сертификат для **{cert_data['ФИО']}** успешно обработан.", parse_mode='Markdown')
         
@@ -539,8 +539,7 @@ async def akc_get_certificate_file(update: Update, context: ContextTypes.DEFAULT
         
     except Exception as e:
         logger.error(f"Ошибка при обработке файла сертификата для заявки: {e}", exc_info=True)
-        await update.message.reply_text("❌ Произошла ошибка при обработке файла. Пожалуйста, попробуйте снова.")
-        return AKC_AWAIT_CERTIFICATE
+        await update.message.reply_text("❌ Произошла ошибка при обработке файла."); return AKC_AWAIT_CERTIFICATE
 
 async def akc_invalid_cert_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Пожалуйста, прикрепите именно файл сертификата, а не текст.")
@@ -574,16 +573,12 @@ async def akc_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     
     try:
         form_data = context.user_data['akc_form']
-        
-        # Создаем DOCX в памяти
         docx_buffer = create_akc_docx(form_data)
         docx_filename = f"Заявка_АЦК_{form_data.get('cert_owner', 'пользователь')}.docx"
         
-        # Получаем сертификат из временного хранилища
         cert_bytes = form_data.get('cert_bytes')
         cert_filename = form_data.get('cert_filename', 'certificate.cer')
 
-        # Создаем ZIP в памяти
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w') as zip_file:
             zip_file.writestr(docx_filename, docx_buffer.getvalue())
@@ -593,12 +588,7 @@ async def akc_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         
         zip_filename = f"Заявка_и_сертификат_{form_data.get('cert_owner', 'пользователь')}.zip"
         
-        await context.bot.send_document(
-            chat_id=update.effective_chat.id,
-            document=zip_buffer,
-            filename=zip_filename,
-            caption="✅ Ваша заявка и сертификат в ZIP-архиве."
-        )
+        await context.bot.send_document(chat_id=update.effective_chat.id, document=zip_buffer, filename=zip_filename, caption="✅ Ваша заявка и сертификат в ZIP-архиве.")
         await query.message.delete()
         
     except Exception as e:
