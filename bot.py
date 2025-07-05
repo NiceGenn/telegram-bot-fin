@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V2.8 - УЛУЧШЕННОЕ ФОРМАТИРОВАНИЕ DOCX)
+#   ФАЙЛ: bot.py (V2.9 - ИСПРАВЛЕНИЕ СОСТОЯНИЙ ДИАЛОГА)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -59,12 +59,12 @@ EXCEL_HEADERS: Tuple[str, ...] = ("ФИО", "Учреждение", "Серий�
 ALLOWED_EXTENSIONS: Tuple[str, ...] = ('.cer', '.crt', '.pem', '.der')
 YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
 
-# Состояния для диалогов
+# <<< ИСПРАВЛЕНИЕ: Количество состояний теперь 15 >>>
 (
     CHOOSING_ACTION, TYPING_DAYS, AWAITING_YOUTUBE_LINK, CONFIRMING_DOWNLOAD,
     AKC_CONFIRM_DEFAULTS, AKC_SENDER_FIO, AKC_ORG_NAME, AKC_INN_KPP, AKC_MUNICIPALITY,
     AKC_AWAIT_CERTIFICATE, AKC_ROLE, AKC_CITP_NAME, AKC_LOGINS, AKC_ACTION
-) = range(15)
+) = range(14)
 
 
 # --- 3. РАБОТА С БАЗОЙ ДАННЫХ POSTGRESQL ---
@@ -253,10 +253,8 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
 
     doc.add_paragraph() 
 
-    # <<< ИЗМЕНЕНИЕ: Используем невидимую таблицу для форматирования шапки >>>
     header_table = doc.add_table(rows=5, cols=2)
     
-    # Данные для шапки
     header_data = [
         ("От кого:", form_data.get('sender_fio', '')),
         ("(Ф.И.О. представителя учреждения)", form_data.get('org_name', '')),
@@ -265,9 +263,7 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
         ("(наименование муниципального образования)", datetime.now().strftime('%d.%m.%Y')),
     ]
 
-    # Заполняем таблицу
     for i, (label, value) in enumerate(header_data):
-        # В левой колонке - подписи
         left_cell = header_table.cell(i, 0)
         left_p = left_cell.paragraphs[0]
         left_run = left_p.add_run(label)
@@ -276,16 +272,14 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
         left_run.font.size = Pt(10)
         left_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
-        # В правой колонке - данные
         right_cell = header_table.cell(i, 1)
         right_p = right_cell.paragraphs[0]
         right_run = right_p.add_run(value)
         right_run.font.name = 'Times New Roman'
         right_run.font.size = Pt(12)
         
-        # Особая обработка первой строки
         if i == 0:
-            right_p.text = "" # Очищаем ячейку
+            right_p.text = ""
             run_bold = right_p.add_run("От кого: ")
             run_bold.bold = True
             run_bold.font.name = 'Times New Roman'
@@ -293,7 +287,7 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
             run_normal = right_p.add_run(value)
             run_normal.font.name = 'Times New Roman'
             run_normal.font.size = Pt(12)
-            left_cell.text = "" # Левая ячейка пустая
+            left_cell.text = ""
 
     doc.add_paragraph()
 
