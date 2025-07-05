@@ -348,7 +348,7 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if filesize > MAX_VIDEO_SIZE_BYTES:
             size_in_mb = filesize / 1024 / 1024
-            await msg.edit_text(f"❌ Видео '{title}' слишком большое ({size_in_mb:.1f} МБ)."); return ConversationHandler.END
+            await msg.edit_message_text(f"❌ Видео '{title}' слишком большое ({size_in_mb:.1f} МБ)."); return ConversationHandler.END
 
         context.user_data['youtube_url'] = url; context.user_data['youtube_title'] = title
         
@@ -624,6 +624,14 @@ async def main() -> None:
         },
         fallbacks=[CommandHandler('start', start), cancel_handler]
     )
+    
+    akc_cert_filter = (
+        filters.Document.FileExtension("cer") |
+        filters.Document.FileExtension("crt") |
+        filters.Document.FileExtension("pem") |
+        filters.Document.FileExtension("der")
+    )
+    
     akc_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^📄 Заявка АЦК$') & user_filter, akc_start)],
         states={
@@ -632,7 +640,7 @@ async def main() -> None:
             AKC_ORG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_org_name)],
             AKC_INN_KPP: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_inn_kpp)],
             AKC_MUNICIPALITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_municipality)],
-            AKC_AWAIT_CERTIFICATE: [MessageHandler(filters.Document.FileExtension(ALLOWED_EXTENSIONS), akc_get_certificate_file), MessageHandler(filters.TEXT & ~filters.COMMAND, akc_invalid_cert_file)],
+            AKC_AWAIT_CERTIFICATE: [MessageHandler(akc_cert_filter, akc_get_certificate_file), MessageHandler(filters.TEXT & ~filters.COMMAND, akc_invalid_cert_file)],
             AKC_ROLE: [CallbackQueryHandler(akc_get_role, pattern='^role_')],
             AKC_CITP_NAME: [CallbackQueryHandler(akc_get_citp_name, pattern='^citp_')],
             AKC_LOGINS: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_logins)],
