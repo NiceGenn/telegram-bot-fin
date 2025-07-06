@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V3.1 - ИСПРАВЛЕНИЕ КНОПОК И ОТМЕНЫ ДИАЛОГОВ)
+#   ФАЙЛ: bot.py (V3.6 - ИСПРАВЛЕНИЕ NAMEERROR)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -407,6 +407,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def request_certificate_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Пожалуйста, отправьте мне файл(ы) сертификатов ({', '.join(ALLOWED_EXTENSIONS)}) или ZIP-архив.")
+
+async def handle_simple_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    button_text = update.message.text
+    if button_text == "❓ Помощь":
+        await help_command(update, context)
+    elif button_text == "Анализ сертификатов":
+        await request_certificate_files(update, context)
 
 def download_video_sync(url: str, ydl_opts: dict) -> str:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
