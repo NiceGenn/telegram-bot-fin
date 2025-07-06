@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V3.0 - ПЕРЕИМЕНОВАНИЕ КНОПОК И ИСПРАВЛЕНИЕ ОТМЕНЫ)
+#   ФАЙЛ: bot.py (V3.1 - ИСПРАВЛЕНИЕ КНОПОК И ОТМЕНЫ ДИАЛОГОВ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -51,6 +51,7 @@ ALLOWED_USER_IDS: Set[int] = {96238783}
 user_filter = filters.User(user_id=ALLOWED_USER_IDS)
 
 MAX_FILE_SIZE = 20 * 1024 * 1024
+MAX_VIDEO_SIZE_BYTES = 49 * 1024 * 1024
 EXPIRATION_THRESHOLD_DAYS = 30
 RED_FILL = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
 ORANGE_FILL = PatternFill(start_color="FFDDAA", end_color="FFDDAA", fill_type="solid")
@@ -378,9 +379,8 @@ async def get_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     await update.message.reply_text(f"Ваш User ID: `{user_id}`", parse_mode='Markdown')
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
-    # <<< ИЗМЕНЕНИЕ: Новые названия и порядок кнопок >>>
     keyboard = [
         ["📜 Анализ сертификатов", "⚙️ Настройки анализа сертификатов"],
         ["🎬 Скачивание с YouTube", "📄 Заявка АЦК"], 
@@ -389,8 +389,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     start_message = (f"Привет, {user.mention_html()}! 👋\n\nЯ бот для анализа сертификатов и скачивания видео.")
     await update.message.reply_html(start_message, reply_markup=reply_markup)
+    return ConversationHandler.END
 
-# <<< ИЗМЕНЕНИЕ: Обновлен текст справки >>>
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     help_text = (
         "Я могу помочь вам с несколькими задачами:\n\n"
@@ -407,13 +407,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def request_certificate_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Пожалуйста, отправьте мне файл(ы) сертификатов ({', '.join(ALLOWED_EXTENSIONS)}) или ZIP-архив.")
-
-async def handle_simple_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    button_text = update.message.text
-    if button_text == "❓ Помощь":
-        await help_command(update, context)
-    elif button_text == "Анализ сертификатов":
-        await request_certificate_files(update, context)
 
 def download_video_sync(url: str, ydl_opts: dict) -> str:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -695,10 +688,10 @@ async def main() -> None:
     init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    cancel_handler = MessageHandler(filters.Regex('^(Анализ сертификатов|Скачивание с YouTube|📄 Заявка АЦК|Настройки анализа сертификатов|❓ Помощь)$') & user_filter, cancel)
+    cancel_handler = MessageHandler(filters.Regex('^(📜 Анализ сертификатов|🎬 Скачивание с YouTube|📄 Заявка АЦК|⚙️ Настройки анализа сертификатов|❓ Помощь)$') & user_filter, cancel)
     
     settings_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^Настройки анализа сертификатов$') & user_filter, settings_entry)],
+        entry_points=[MessageHandler(filters.Regex('^⚙️ Настройки анализа сертификатов$') & user_filter, settings_entry)],
         states={
             CHOOSING_ACTION: [CallbackQueryHandler(prompt_for_days, pattern='^change_threshold$'), CallbackQueryHandler(end_conversation, pattern='^back_to_main$')],
             TYPING_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_days)],
@@ -706,9 +699,9 @@ async def main() -> None:
         fallbacks=[CommandHandler('start', start), cancel_handler],
     )
     youtube_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^Скачивание с YouTube$') & user_filter, youtube_entry)],
+        entry_points=[MessageHandler(filters.Regex('^🎬 Скачивание с YouTube$') & user_filter, youtube_entry)],
         states={
-            AWAITING_YOUTUBE_LINK: [MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_link), MessageHandler(filters.TEXT & ~filters.COMMAND, invalid_youtube_link)],
+            AWAITING_YOUTUBE_LINK: [MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_link)],
             CONFIRMING_DOWNLOAD: [CallbackQueryHandler(start_download_confirmed, pattern='^yt_confirm$'), CallbackQueryHandler(cancel_download, pattern='^yt_cancel$')]
         },
         fallbacks=[CommandHandler('start', start), cancel_handler]
@@ -729,7 +722,7 @@ async def main() -> None:
             AKC_ORG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_org_name)],
             AKC_INN_KPP: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_inn_kpp)],
             AKC_MUNICIPALITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_municipality)],
-            AKC_AWAIT_CERTIFICATE: [MessageHandler(akc_cert_filter, akc_get_certificate_file), MessageHandler(filters.TEXT & ~filters.COMMAND, akc_invalid_cert_file)],
+            AKC_AWAIT_CERTIFICATE: [MessageHandler(akc_cert_filter, akc_get_certificate_file), MessageHandler(filters.Document.FileExtension("zip"), akc_invalid_cert_file)],
             AKC_ROLE: [CallbackQueryHandler(akc_get_role, pattern='^role_')],
             AKC_CITP_NAME: [CallbackQueryHandler(akc_get_citp_name, pattern='^citp_')],
             AKC_LOGINS: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_logins)],
@@ -745,7 +738,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("my_id", get_my_id))
     application.add_handler(CommandHandler("start", start, filters=user_filter))
     
-    simple_buttons_text = "^(Анализ сертификатов|❓ Помощь)$"
+    simple_buttons_text = "^(📜 Анализ сертификатов|❓ Помощь)$"
     application.add_handler(MessageHandler(filters.Regex(simple_buttons_text) & user_filter, handle_simple_buttons))
     
     allowed_extensions_filter = (
