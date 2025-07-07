@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V4.7 - С ПАКЕТНОЙ ОБРАБОТКОЙ ЗАЯВОК)
+#  ФАЙЛ: bot.py (V4.9 - С РАЗГРАНИЧЕНИЕМ ДОСТУПА)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -47,9 +47,44 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ЗАМЕНИТЕ 96238783 НА ВАШ TELEGRAM USER ID
-ALLOWED_USER_IDS: Set[int] = {96238783} 
-user_filter = filters.User(user_id=ALLOWED_USER_IDS)
+# --- СИСТЕМА РАЗРЕШЕНИЙ (ROLES/PERMISSIONS) ---
+# Определите здесь, какие функции доступны разным пользователям.
+#
+# Доступные разрешения:
+# 'admin'           - полный доступ ко всем функциям.
+# 'cert_analysis'   - доступ к "Анализ сертификатов".
+# 'akc_form'        - доступ к "Заявка АЦК".
+# 'youtube'         - доступ к "Скачивание с YouTube".
+# 'settings'        - доступ к "Настройки анализа сертификатов".
+#
+# ПРИМЕР:
+USER_PERMISSIONS: Dict[int, Set[str]] = {
+    # Администратор с полным доступом
+    96238783: {"admin"},
+    # Пользователь, который может только создавать заявки АЦК
+    12345678: {"akc_form"}, 
+    # Пользователь для анализа сертификатов и скачивания видео
+    00000000: {"cert_analysis", "youtube"}, 
+}
+
+# Фильтр для всех пользователей, у которых есть хоть какие-то права
+authorized_user_filter = filters.User(user_id=USER_PERMISSIONS.keys())
+
+def has_permission(user_id: int, feature: str) -> bool:
+    """Проверяет, есть ли у пользователя доступ к функции."""
+    permissions = USER_PERMISSIONS.get(user_id, set())
+    if "admin" in permissions:
+        return True
+    return feature in permissions
+
+class PermissionFilter(filters.BaseFilter):
+    """Кастомный фильтр для проверки разрешений пользователя."""
+    def __init__(self, feature: str):
+        self.feature = feature
+    def filter(self, message: Message) -> bool:
+        return has_permission(message.from_user.id, self.feature)
+
+# -------------------------------------------------
 
 MAX_FILE_SIZE = 20 * 1024 * 1024
 MAX_VIDEO_SIZE_BYTES = 49 * 1024 * 1024
@@ -488,22 +523,34 @@ async def get_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Ваш User ID: `{user_id}`", parse_mode='Markdown')
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработчик команды /start. Отображает главное меню."""
+    """Обработчик команды /start. Отображает главное меню в зависимости от прав."""
     user = update.effective_user
-    keyboard = [
-        ["📜 Анализ сертификатов", "⚙️ Настройки анализа сертификатов"],
-        ["🎬 Скачивание с YouTube", "📄 Заявка АЦК"], 
-        ["❓ Помощь"]
-    ]
+    user_id = user.id
+    
+    # Динамическое формирование клавиатуры на основе разрешений
+    keyboard = []
+    row1 = []
+    if has_permission(user_id, "cert_analysis"):
+        row1.append("📜 Анализ сертификатов")
+    if has_permission(user_id, "settings"):
+        row1.append("⚙️ Настройки анализа сертификатов")
+    if row1:
+        keyboard.append(row1)
+
+    row2 = []
+    if has_permission(user_id, "youtube"):
+        row2.append("🎬 Скачивание с YouTube")
+    if has_permission(user_id, "akc_form"):
+        row2.append("📄 Заявка АЦК")
+    if row2:
+        keyboard.append(row2)
+        
+    keyboard.append(["❓ Помощь"]) # Помощь доступна всем авторизованным пользователям
+
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     start_message = (
         f"Привет, {user.mention_html()}! 👋\n\n"
-        "Я — ваш многофункциональный помощник. Вот что я умею:\n\n"
-        "📜 <b>Анализ сертификатов</b> — создаю Excel-отчеты о сроках действия.\n"
-        "📄 <b>Заявка АЦК</b> — помогаю быстро сформировать заявку и упаковать в ZIP-архив.\n"
-        "🎬 <b>Скачивание с YouTube</b> — загружаю видео прямо в чат.\n"
-        "⚙️ <b>Гибкие настройки</b> — вы можете настроить порог оповещений для сертификатов.\n\n"
-        "Выберите действие на клавиатуре ниже, чтобы начать."
+        "Я — ваш многофункциональный помощник. Выберите доступное действие на клавиатуре."
     )
     await update.message.reply_html(start_message, reply_markup=reply_markup)
     return ConversationHandler.END
@@ -1022,7 +1069,7 @@ async def main() -> None:
     cancel_handler = MessageHandler(filters.Regex('^/cancel$') | filters.Regex('^Отмена$'), cancel)
     
     settings_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^⚙️ Настройки анализа сертификатов$') & user_filter, settings_entry)],
+        entry_points=[MessageHandler(filters.Regex('^⚙️ Настройки анализа сертификатов$') & PermissionFilter("settings"), settings_entry)],
         states={
             CHOOSING_ACTION: [CallbackQueryHandler(prompt_for_days, pattern='^change_threshold$'), CallbackQueryHandler(end_conversation, pattern='^back_to_main$')],
             TYPING_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_days)],
@@ -1031,7 +1078,7 @@ async def main() -> None:
     )
     
     youtube_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^🎬 Скачивание с YouTube$') & user_filter, youtube_entry)],
+        entry_points=[MessageHandler(filters.Regex('^🎬 Скачивание с YouTube$') & PermissionFilter("youtube"), youtube_entry)],
         states={
             AWAITING_YOUTUBE_LINK: [MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_link)],
             CONFIRMING_DOWNLOAD: [CallbackQueryHandler(start_download_confirmed, pattern='^yt_confirm$'), CallbackQueryHandler(cancel_download, pattern='^yt_cancel$')]
@@ -1042,7 +1089,7 @@ async def main() -> None:
     akc_cert_filter = filters.Document.FileExtension("cer") | filters.Document.FileExtension("crt")
     
     akc_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^📄 Заявка АЦК$') & user_filter, akc_start)],
+        entry_points=[MessageHandler(filters.Regex('^📄 Заявка АЦК$') & PermissionFilter("akc_form"), akc_start)],
         states={
             AKC_CONFIRM_DEFAULTS: [CallbackQueryHandler(akc_use_defaults, pattern='^akc_use_defaults$'), CallbackQueryHandler(akc_refill_defaults, pattern='^akc_refill$')],
             AKC_SENDER_FIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_sender_fio)],
@@ -1071,18 +1118,19 @@ async def main() -> None:
     application.add_handler(akc_conv_handler)
     
     application.add_handler(CommandHandler("my_id", get_my_id))
-    application.add_handler(CommandHandler("start", start, filters=user_filter))
+    application.add_handler(CommandHandler("start", start, filters=authorized_user_filter))
+    application.add_handler(CommandHandler("cert", request_certificate_files, filters=PermissionFilter("cert_analysis")))
     
-    simple_buttons_text = "^(📜 Анализ сертификатов|❓ Помощь)$"
-    application.add_handler(MessageHandler(filters.Regex(simple_buttons_text) & user_filter, handle_simple_buttons))
+    application.add_handler(MessageHandler(filters.Regex("^(📜 Анализ сертификатов)$") & PermissionFilter("cert_analysis"), handle_simple_buttons))
+    application.add_handler(MessageHandler(filters.Regex("^(❓ Помощь)$") & authorized_user_filter, handle_simple_buttons))
     
     allowed_docs_filter = (
         filters.Document.FileExtension("zip") | filters.Document.FileExtension("cer") |
         filters.Document.FileExtension("crt") | filters.Document.FileExtension("pem") |
         filters.Document.FileExtension("der")
     )
-    application.add_handler(MessageHandler(allowed_docs_filter & ~filters.COMMAND & user_filter, handle_document))
-    application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND & user_filter, handle_wrong_document))
+    application.add_handler(MessageHandler(allowed_docs_filter & ~filters.COMMAND & PermissionFilter("cert_analysis"), handle_document))
+    application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND & authorized_user_filter, handle_wrong_document))
 
     logger.info("Запускаю бота...")
     async with application:
