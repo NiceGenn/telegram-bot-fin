@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V4.9 - С РАЗГРАНИЧЕНИЕМ ДОСТУПА)
+#  ФАЙЛ: bot.py (V5.1 - С БЕЗОПАСНЫМИ ШАБЛОНАМИ ДОСТУПА)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -57,15 +57,15 @@ logger = logging.getLogger(__name__)
 # 'youtube'         - доступ к "Скачивание с YouTube".
 # 'settings'        - доступ к "Настройки анализа сертификатов".
 #
-# ПРИМЕР:
 USER_PERMISSIONS: Dict[int, Set[str]] = {
     # Администратор с полным доступом
     96238783: {"admin"},
-    # Пользователь, который может только создавать заявки АЦК
-    12345678: {"akc_form"}, 
+    # Пользователь только для заявок АЦК
+    789151481: {"akc_form"}, 
     # Пользователь для анализа сертификатов и скачивания видео
-    00000000: {"cert_analysis", "youtube"}, 
+    12345678: {"cert_analysis", "youtube"}, 
 }
+
 
 # Фильтр для всех пользователей, у которых есть хоть какие-то права
 authorized_user_filter = filters.User(user_id=USER_PERMISSIONS.keys())
@@ -81,8 +81,16 @@ class PermissionFilter(filters.BaseFilter):
     """Кастомный фильтр для проверки разрешений пользователя."""
     def __init__(self, feature: str):
         self.feature = feature
+        self.data_filter = False  # Это исправляет ошибку слияния фильтров
+
     def filter(self, message: Message) -> bool:
-        return has_permission(message.from_user.id, self.feature)
+        """
+        Фильтрует сообщения, проверяя, есть ли у пользователя разрешение на доступ к функции.
+        Этот фильтр предназначен для использования с MessageHandler и CommandHandler.
+        """
+        if message.from_user:
+            return has_permission(message.from_user.id, self.feature)
+        return False
 
 # -------------------------------------------------
 
