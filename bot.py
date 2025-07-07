@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V4.3 - С ОБНОВЛЕННЫМ ПРИВЕТСТВИЕМ)
+#  ФАЙЛ: bot.py (V4.5 - С СОХРАНЕНИЕМ ЛОГИНОВ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -65,8 +65,8 @@ YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(c
 (
     CHOOSING_ACTION, TYPING_DAYS, AWAITING_YOUTUBE_LINK, CONFIRMING_DOWNLOAD,
     AKC_CONFIRM_DEFAULTS, AKC_SENDER_FIO, AKC_ORG_NAME, AKC_INN_KPP, AKC_MUNICIPALITY,
-    AKC_AWAIT_CERTIFICATE, AKC_ROLE, AKC_CITP_NAME, AKC_LOGINS, AKC_ACTION
-) = range(14)
+    AKC_AWAIT_CERTIFICATE, AKC_ROLE, AKC_CITP_NAME, AKC_CONFIRM_LOGINS, AKC_LOGINS, AKC_ACTION
+) = range(15)
 
 
 # --- 3. РАБОТА С БАЗОЙ ДАННЫХ POSTGRESQL ---
@@ -93,6 +93,12 @@ def init_database():
                     org_name TEXT NOT NULL,
                     inn_kpp TEXT NOT NULL,
                     municipality TEXT NOT NULL
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS akc_login_defaults (
+                    user_id BIGINT PRIMARY KEY,
+                    logins TEXT NOT NULL
                 )
             ''')
         conn.commit()
@@ -173,6 +179,36 @@ def load_akc_defaults(user_id: int) -> Optional[Dict[str, str]]:
                 'municipality': result[3]
             }
         return None
+    finally:
+        if conn: conn.close()
+
+def save_akc_logins(user_id: int, logins: str):
+    """Сохраняет логины пользователя для заявки АЦК."""
+    conn = get_db_connection()
+    if not conn: return
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO akc_login_defaults (user_id, logins) VALUES (%s, %s) "
+                "ON CONFLICT (user_id) DO UPDATE SET logins = EXCLUDED.logins;",
+                (user_id, logins)
+            )
+        conn.commit()
+        logger.info(f"Логины для пользователя {user_id} сохранены.")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении логинов для {user_id}: {e}")
+    finally:
+        if conn: conn.close()
+
+def load_akc_logins(user_id: int) -> Optional[str]:
+    """Загружает сохраненные логины пользователя."""
+    conn = get_db_connection()
+    if not conn: return None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT logins FROM akc_login_defaults WHERE user_id = %s", (user_id,))
+            result = cursor.fetchone()
+        return result[0] if result else None
     finally:
         if conn: conn.close()
 
@@ -682,19 +718,31 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 async def akc_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Начинает диалог создания заявки АЦК."""
+    """Начинает диалог создания заявки АЦК и выводит описание."""
     user_id = update.effective_user.id
     context.user_data['akc_form'] = {}
-    
+
+    description = (
+        "**Мастер создания заявки АЦК** 📄\n\n"
+        "Этот мастер поможет вам пошагово сформировать заявку на регистрацию пользователя ЦИТП.\n\n"
+        "**Что он делает:**\n"
+        "1. Запрашивает данные для шапки документа (ФИО, организация и т.д.).\n"
+        "2. Сохраняет эти данные как шаблон для ускорения работы в будущем.\n"
+        "3. Просит прикрепить файл сертификата и автоматически извлекает из него данные.\n"
+        "4. Помогает заполнить табличную часть заявки.\n"
+        "5. В итоге создает **ZIP-архив**, содержащий готовую заявку в формате **DOCX** и сам файл сертификата.\n\n"
+        "------------------------------------\n\n"
+    )
+
     defaults = load_akc_defaults(user_id)
     if defaults:
         context.user_data['akc_defaults'] = defaults
-        text = (
+        text = description + (
             "Найдены сохраненные данные для шапки заявки:\n\n"
-            f"**От кого:** {defaults['sender_fio']}\n"
-            f"**Учреждение:** {defaults['org_name']}\n"
-            f"**ИНН/КПП:** {defaults['inn_kpp']}\n"
-            f"**МО:** {defaults['municipality']}\n\n"
+            f"• **От кого:** {defaults['sender_fio']}\n"
+            f"• **Учреждение:** {defaults['org_name']}\n"
+            f"• **ИНН/КПП:** {defaults['inn_kpp']}\n"
+            f"• **МО:** {defaults['municipality']}\n\n"
             "Использовать эти данные?"
         )
         keyboard = [[InlineKeyboardButton("✅ Да, использовать", callback_data='akc_use_defaults')], [InlineKeyboardButton("✏️ Заполнить заново", callback_data='akc_refill')]]
@@ -702,7 +750,8 @@ async def akc_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
         return AKC_CONFIRM_DEFAULTS
     else:
-        await update.message.reply_text("Начинаем формирование заявки АЦК.\n\nВведите **ФИО представителя учреждения**:", parse_mode='Markdown')
+        text = description + "Начинаем! Введите **ФИО представителя учреждения**:"
+        await update.message.reply_text(text, parse_mode='Markdown')
         return AKC_SENDER_FIO
 
 async def akc_use_defaults(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -797,20 +846,73 @@ async def akc_get_role(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return AKC_CITP_NAME
 
 async def akc_get_citp_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получает наименование ЦИТП."""
+    """Получает наименование ЦИТП и проверяет сохраненные логины."""
     query = update.callback_query
     await query.answer()
     citp_name = query.data.split('_')[1]
     context.user_data['akc_form']['citp_name'] = citp_name
-    await query.edit_message_text(text=f"Выбрана система: {citp_name}.\n\nВведите **имена пользователей (логины)**, через запятую:", parse_mode='Markdown')
+    
+    user_id = update.effective_user.id
+    saved_logins = load_akc_logins(user_id)
+    
+    if saved_logins:
+        context.user_data['akc_saved_logins'] = saved_logins
+        text = (
+            f"Выбрана система: {citp_name}.\n\n"
+            f"Найдены ранее сохраненные логины: `{saved_logins}`\n\n"
+            "Использовать их?"
+        )
+        keyboard = [
+            [InlineKeyboardButton("✅ Да, использовать", callback_data='logins_use_saved')],
+            [InlineKeyboardButton("✏️ Ввести новые", callback_data='logins_enter_new')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode='Markdown')
+        return AKC_CONFIRM_LOGINS
+    else:
+        await query.edit_message_text(text=f"Выбрана система: {citp_name}.\n\nВведите **имена пользователей (логины)**, через запятую:", parse_mode='Markdown')
+        return AKC_LOGINS
+
+async def akc_use_saved_logins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Использует сохраненные логины и переходит к следующему шагу."""
+    query = update.callback_query
+    await query.answer()
+    
+    saved_logins = context.user_data.get('akc_saved_logins')
+    context.user_data['akc_form']['logins'] = saved_logins
+    
+    keyboard = [
+        [InlineKeyboardButton("Добавить", callback_data='action_добавить'), InlineKeyboardButton("Удалить", callback_data='action_удалить')],
+        [InlineKeyboardButton("Заменить", callback_data='action_заменить'), InlineKeyboardButton("Заблокировать", callback_data='action_заблокировать')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text("Логины применены.\n\nВыберите **действие** с сертификатом:", reply_markup=reply_markup, parse_mode='Markdown')
+    
+    context.user_data.pop('akc_saved_logins', None)
+    return AKC_ACTION
+
+async def akc_enter_new_logins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запрашивает ввод новых логинов."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Введите **новые имена пользователей (логины)**, через запятую:", parse_mode='Markdown')
     return AKC_LOGINS
 
 async def akc_get_logins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получает логины пользователей."""
-    context.user_data['akc_form']['logins'] = update.message.text
-    keyboard = [[InlineKeyboardButton("Добавить", callback_data='action_добавить'), InlineKeyboardButton("Удалить", callback_data='action_удалить')], [InlineKeyboardButton("Заменить", callback_data='action_заменить'), InlineKeyboardButton("Заблокировать", callback_data='action_заблокировать')]]
+    """Получает и сохраняет логины пользователей."""
+    user_id = update.effective_user.id
+    logins = update.message.text
+    context.user_data['akc_form']['logins'] = logins
+    
+    # Сохраняем новые логины для будущего использования
+    save_akc_logins(user_id, logins)
+    
+    keyboard = [
+        [InlineKeyboardButton("Добавить", callback_data='action_добавить'), InlineKeyboardButton("Удалить", callback_data='action_удалить')],
+        [InlineKeyboardButton("Заменить", callback_data='action_заменить'), InlineKeyboardButton("Заблокировать", callback_data='action_заблокировать')]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Выберите **действие** с сертификатом:", reply_markup=reply_markup, parse_mode='Markdown')
+    await update.message.reply_text("Новые логины сохранены.\n\nВыберите **действие** с сертификатом:", reply_markup=reply_markup, parse_mode='Markdown')
     return AKC_ACTION
 
 async def akc_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -902,6 +1004,10 @@ async def main() -> None:
             AKC_AWAIT_CERTIFICATE: [MessageHandler(akc_cert_filter, akc_get_certificate_file), MessageHandler(filters.Document.ALL, akc_invalid_cert_file)],
             AKC_ROLE: [CallbackQueryHandler(akc_get_role, pattern='^role_')],
             AKC_CITP_NAME: [CallbackQueryHandler(akc_get_citp_name, pattern='^citp_')],
+            AKC_CONFIRM_LOGINS: [
+                CallbackQueryHandler(akc_use_saved_logins, pattern='^logins_use_saved$'),
+                CallbackQueryHandler(akc_enter_new_logins, pattern='^logins_enter_new$')
+            ],
             AKC_LOGINS: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_logins)],
             AKC_ACTION: [CallbackQueryHandler(akc_finish, pattern='^action_')],
         },
