@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V4.5 - С СОХРАНЕНИЕМ ЛОГИНОВ)
+#  ФАЙЛ: bot.py (V4.6 - С ИСПРАВЛЕННЫМ ДИАЛОГОМ АЦК)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -834,6 +834,15 @@ async def akc_invalid_cert_file(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text("Пожалуйста, прикрепите именно файл сертификата, а не текст или архив.")
     return AKC_AWAIT_CERTIFICATE
 
+async def akc_unexpected_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает неожиданно присланный документ во время диалога АЦК."""
+    await update.message.reply_text(
+        "Я уже получил сертификат и ожидаю выбора действия на клавиатуре. "
+        "Пожалуйста, завершите текущее создание заявки."
+    )
+    # Возвращаем None, чтобы остаться в том же состоянии диалога
+    return None
+
 async def akc_get_role(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Получает роль субъекта."""
     query = update.callback_query
@@ -992,6 +1001,9 @@ async def main() -> None:
         filters.Document.FileExtension("der")
     )
     
+    # Обработчик для неожиданных документов в диалоге АЦК
+    unexpected_doc_handler = MessageHandler(filters.Document, akc_unexpected_document)
+    
     # Диалог для создания заявки АЦК
     akc_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^📄 Заявка АЦК$') & user_filter, akc_start)],
@@ -1002,14 +1014,15 @@ async def main() -> None:
             AKC_INN_KPP: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_inn_kpp)],
             AKC_MUNICIPALITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_municipality)],
             AKC_AWAIT_CERTIFICATE: [MessageHandler(akc_cert_filter, akc_get_certificate_file), MessageHandler(filters.Document.ALL, akc_invalid_cert_file)],
-            AKC_ROLE: [CallbackQueryHandler(akc_get_role, pattern='^role_')],
-            AKC_CITP_NAME: [CallbackQueryHandler(akc_get_citp_name, pattern='^citp_')],
+            AKC_ROLE: [CallbackQueryHandler(akc_get_role, pattern='^role_'), unexpected_doc_handler],
+            AKC_CITP_NAME: [CallbackQueryHandler(akc_get_citp_name, pattern='^citp_'), unexpected_doc_handler],
             AKC_CONFIRM_LOGINS: [
                 CallbackQueryHandler(akc_use_saved_logins, pattern='^logins_use_saved$'),
-                CallbackQueryHandler(akc_enter_new_logins, pattern='^logins_enter_new$')
+                CallbackQueryHandler(akc_enter_new_logins, pattern='^logins_enter_new$'),
+                unexpected_doc_handler
             ],
-            AKC_LOGINS: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_logins)],
-            AKC_ACTION: [CallbackQueryHandler(akc_finish, pattern='^action_')],
+            AKC_LOGINS: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_logins), unexpected_doc_handler],
+            AKC_ACTION: [CallbackQueryHandler(akc_finish, pattern='^action_'), unexpected_doc_handler],
         },
         fallbacks=[CommandHandler('start', start), cancel_handler],
     )
