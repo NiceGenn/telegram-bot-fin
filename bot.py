@@ -1,5 +1,5 @@
 # =================================================================================
-#   ФАЙЛ: bot.py (V4.0 - ЕДИНАЯ СТАБИЛЬНАЯ ВЕРСИЯ)
+#  ФАЙЛ: bot.py (V4.3 - С ОБНОВЛЕННЫМ ПРИВЕТСТВИЕМ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -47,7 +47,8 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-ALLOWED_USER_IDS: Set[int] = {96238783}
+# ЗАМЕНИТЕ 96238783 НА ВАШ TELEGRAM USER ID
+ALLOWED_USER_IDS: Set[int] = {96238783} 
 user_filter = filters.User(user_id=ALLOWED_USER_IDS)
 
 MAX_FILE_SIZE = 20 * 1024 * 1024
@@ -70,6 +71,7 @@ YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(c
 
 # --- 3. РАБОТА С БАЗОЙ ДАННЫХ POSTGRESQL ---
 def get_db_connection():
+    """Устанавливает соединение с базой данных PostgreSQL."""
     try:
         conn = psycopg2.connect(DATABASE_URL)
         return conn
@@ -78,6 +80,7 @@ def get_db_connection():
         return None
 
 def init_database():
+    """Инициализирует таблицы в базе данных, если они не существуют."""
     conn = get_db_connection()
     if not conn: return
     try:
@@ -100,6 +103,7 @@ def init_database():
         if conn: conn.close()
 
 def save_user_threshold(user_id: int, threshold: int):
+    """Сохраняет порог дней для пользователя в базу данных."""
     conn = get_db_connection()
     if not conn: return
     try:
@@ -110,6 +114,7 @@ def save_user_threshold(user_id: int, threshold: int):
         if conn: conn.close()
 
 def load_user_threshold(user_id: int) -> Optional[int]:
+    """Загружает порог дней для пользователя из базы данных."""
     conn = get_db_connection()
     if not conn: return None
     try:
@@ -121,15 +126,19 @@ def load_user_threshold(user_id: int) -> Optional[int]:
         if conn: conn.close()
 
 async def get_user_threshold(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получает порог дней из кэша или базы данных."""
     if 'threshold' in context.user_data:
         return context.user_data['threshold']
+    
     threshold_from_db = load_user_threshold(user_id)
     if threshold_from_db is not None:
         context.user_data['threshold'] = threshold_from_db
         return threshold_from_db
+    
     return EXPIRATION_THRESHOLD_DAYS
 
 def save_akc_defaults(user_id: int, form_data: dict):
+    """Сохраняет данные шапки заявки АЦК как шаблон."""
     conn = get_db_connection()
     if not conn: return
     try:
@@ -149,6 +158,7 @@ def save_akc_defaults(user_id: int, form_data: dict):
         if conn: conn.close()
 
 def load_akc_defaults(user_id: int) -> Optional[Dict[str, str]]:
+    """Загружает шаблон данных для заявки АЦК."""
     conn = get_db_connection()
     if not conn: return None
     try:
@@ -169,53 +179,108 @@ def load_akc_defaults(user_id: int) -> Optional[Dict[str, str]]:
 
 # --- 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def create_excel_report(cert_data_list: List[Dict[str, Any]], user_threshold: int) -> io.BytesIO:
-    wb = Workbook(); ws = wb.active; ws.title = "Отчет по сертификатам"
-    ws.append(list(EXCEL_HEADERS)); sorted_cert_data = sorted(cert_data_list, key=lambda x: x["Действителен до"])
+    """Создает Excel-отчет на основе данных сертификатов."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Отчет по сертификатам"
+    ws.append(list(EXCEL_HEADERS))
+    
+    sorted_cert_data = sorted(cert_data_list, key=lambda x: x["Действителен до"])
+    
     for cert_data in sorted_cert_data:
-        row = [cert_data["ФИО"], cert_data["Учреждение"], cert_data["Серийный номер"], cert_data["Действителен с"].strftime("%d.%m.%Y"), cert_data["Действителен до"].strftime("%d.%m.%Y"), cert_data["Осталось дней"]]
-        ws.append(row); last_row = ws.max_row; days_left = cert_data["Осталось дней"]
+        row = [
+            cert_data["ФИО"], 
+            cert_data["Учреждение"], 
+            cert_data["Серийный номер"], 
+            cert_data["Действителен с"].strftime("%d.%m.%Y"), 
+            cert_data["Действителен до"].strftime("%d.%m.%Y"), 
+            cert_data["Осталось дней"]
+        ]
+        ws.append(row)
+        
+        last_row = ws.max_row
+        days_left = cert_data["Осталось дней"]
         fill_color = None
-        if days_left < 0: fill_color = RED_FILL
-        elif 0 <= days_left <= user_threshold: fill_color = ORANGE_FILL
-        else: fill_color = GREEN_FILL
+        
+        if days_left < 0:
+            fill_color = RED_FILL
+        elif 0 <= days_left <= user_threshold:
+            fill_color = ORANGE_FILL
+        else:
+            fill_color = GREEN_FILL
+            
         if fill_color:
-            for cell in ws[last_row]: cell.fill = fill_color
+            for cell in ws[last_row]:
+                cell.fill = fill_color
+                
     for column in ws.columns:
-        max_length = 0; column_letter = get_column_letter(column[0].column)
+        max_length = 0
+        column_letter = get_column_letter(column[0].column)
         for cell in column:
             try:
-                if len(str(cell.value)) > max_length: max_length = len(str(cell.value))
-            except: pass
-        adjusted_width = (max_length + 2); ws.column_dimensions[column_letter].width = adjusted_width
-    excel_buffer = io.BytesIO(); wb.save(excel_buffer); excel_buffer.seek(0)
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = (max_length + 2)
+        ws.column_dimensions[column_letter].width = adjusted_width
+        
+    excel_buffer = io.BytesIO()
+    wb.save(excel_buffer)
+    excel_buffer.seek(0)
     return excel_buffer
 
 def generate_summary_message(cert_data_list: List[Dict[str, Any]], user_threshold: int) -> str:
+    """Генерирует сводное сообщение о скоро истекающих сертификатах."""
     expiring_soon_certs = []
     for cert_data in cert_data_list:
         days_left = cert_data["Осталось дней"]
         if 0 <= days_left <= user_threshold:
             expiring_soon_certs.append(f"👤 {cert_data['ФИО']} — {cert_data['Действителен до'].strftime('%d.%m.%Y')} (осталось {days_left} дн.)")
+            
     if expiring_soon_certs:
         message_parts = [f"⚠️ Скоро истекают ({user_threshold} дней):", *expiring_soon_certs]
         return "\n".join(message_parts)
-    else: return "✅ Сертификатов, истекающих в ближайшее время, не найдено."
+    else:
+        return "✅ Сертификатов, истекающих в ближайшее время, не найдено."
 
 def get_certificate_info(cert_bytes: bytes) -> Optional[Dict[str, Any]]:
+    """Извлекает информацию из файла сертификата."""
     try:
-        try: cert = x509.load_pem_x509_certificate(cert_bytes, default_backend())
-        except ValueError: cert = x509.load_der_x509_certificate(cert_bytes, default_backend())
-        try: subject_common_name = cert.subject.get_attributes_for_oid(x509.OID_COMMON_NAME)[0].value
-        except IndexError: subject_common_name = "Неизвестно"
-        try: organization_name = cert.subject.get_attributes_for_oid(x509.OID_ORGANIZATION_NAME)[0].value
-        except IndexError: organization_name = "Неизвестно"
-        serial_number = f"{cert.serial_number:X}"; valid_from = cert.not_valid_before.date(); valid_until = cert.not_valid_after.date()
+        try:
+            cert = x509.load_pem_x509_certificate(cert_bytes, default_backend())
+        except ValueError:
+            cert = x509.load_der_x509_certificate(cert_bytes, default_backend())
+            
+        try:
+            subject_common_name = cert.subject.get_attributes_for_oid(x509.OID_COMMON_NAME)[0].value
+        except IndexError:
+            subject_common_name = "Неизвестно"
+            
+        try:
+            organization_name = cert.subject.get_attributes_for_oid(x509.OID_ORGANIZATION_NAME)[0].value
+        except IndexError:
+            organization_name = "Неизвестно"
+            
+        serial_number = f"{cert.serial_number:X}"
+        valid_from = cert.not_valid_before.date()
+        valid_until = cert.not_valid_after.date()
         days_left = (valid_until - datetime.now().date()).days
-        return {"ФИО": subject_common_name, "Учреждение": organization_name, "Серийный номер": serial_number, "Действителен с": valid_from, "Действителен до": valid_until, "Осталось дней": days_left}
+        
+        return {
+            "ФИО": subject_common_name,
+            "Учреждение": organization_name,
+            "Серийный номер": serial_number,
+            "Действителен с": valid_from,
+            "Действителен до": valid_until,
+            "Осталось дней": days_left
+        }
     except Exception as e:
-        logger.error(f"Ошибка при парсинге сертификата: {e}"); return None
+        logger.error(f"Ошибка при парсинге сертификата: {e}")
+        return None
 
 def _process_file_content(file_bytes: bytes, file_name: str) -> List[Dict[str, Any]]:
+    """Обрабатывает содержимое файла (сертификат или ZIP-архив)."""
     all_certs_data = []
     if file_name.lower().endswith(".zip"):
         try:
@@ -224,15 +289,19 @@ def _process_file_content(file_bytes: bytes, file_name: str) -> List[Dict[str, A
                     if member.lower().endswith(ALLOWED_EXTENSIONS):
                         with z.open(member) as cert_file:
                             cert_info = get_certificate_info(cert_file.read())
-                            if cert_info: all_certs_data.append(cert_info)
+                            if cert_info:
+                                all_certs_data.append(cert_info)
         except zipfile.BadZipFile:
-            logger.error(f"Получен поврежденный ZIP-файл: {file_name}", exc_info=True); return []
+            logger.error(f"Получен поврежденный ZIP-файл: {file_name}", exc_info=True)
+            return []
     elif file_name.lower().endswith(ALLOWED_EXTENSIONS):
         cert_info = get_certificate_info(file_bytes)
-        if cert_info: all_certs_data.append(cert_info)
+        if cert_info:
+            all_certs_data.append(cert_info)
     return all_certs_data
 
 def create_akc_docx(form_data: dict) -> io.BytesIO:
+    """Создает DOCX-файл заявки АЦК."""
     doc = docx.Document()
     section = doc.sections[0]
     section.orientation = WD_ORIENT.LANDSCAPE
@@ -376,10 +445,12 @@ def create_akc_docx(form_data: dict) -> io.BytesIO:
 
 # --- 5. ОБРАБОТЧИКИ КОМАНД, КНОПОК И ДИАЛОГОВ ---
 async def get_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отправляет пользователю его Telegram ID."""
     user_id = update.effective_user.id
     await update.message.reply_text(f"Ваш User ID: `{user_id}`", parse_mode='Markdown')
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработчик команды /start. Отображает главное меню."""
     user = update.effective_user
     keyboard = [
         ["📜 Анализ сертификатов", "⚙️ Настройки анализа сертификатов"],
@@ -387,11 +458,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         ["❓ Помощь"]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    start_message = (f"Привет, {user.mention_html()}! 👋\n\nЯ бот для анализа сертификатов и скачивания видео.")
+    start_message = (
+        f"Привет, {user.mention_html()}! 👋\n\n"
+        "Я — ваш многофункциональный помощник. Вот что я умею:\n\n"
+        "📜 <b>Анализ сертификатов</b> — создаю Excel-отчеты о сроках действия.\n"
+        "📄 <b>Заявка АЦК</b> — помогаю быстро сформировать заявку и упаковать в ZIP-архив.\n"
+        "🎬 <b>Скачивание с YouTube</b> — загружаю видео прямо в чат.\n"
+        "⚙️ <b>Гибкие настройки</b> — вы можете настроить порог оповещений для сертификатов.\n\n"
+        "Выберите действие на клавиатуре ниже, чтобы начать."
+    )
     await update.message.reply_html(start_message, reply_markup=reply_markup)
     return ConversationHandler.END
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик кнопки 'Помощь'. Отправляет справочную информацию."""
     help_text = (
         "Я могу помочь вам с несколькими задачами:\n\n"
         "📜 **Анализ сертификатов**\n"
@@ -406,21 +486,39 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(help_text)
 
 async def request_certificate_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(f"Пожалуйста, отправьте мне файл(ы) сертификатов ({', '.join(ALLOWED_EXTENSIONS)}) или ZIP-архив.")
+    """
+    Отправляет пользователю подробное описание функции анализа сертификатов
+    и запрашивает файлы для анализа.
+    """
+    description_text = (
+        "**Анализ цифровых сертификатов** 📊\n\n"
+        "Эта функция предназначена для проверки сроков действия цифровых сертификатов.\n\n"
+        "**Как это работает:**\n"
+        "1. Вы отправляете мне файлы сертификатов (`.cer`, `.crt`, `.pem`, `.der`) по одному или в виде ZIP-архива.\n"
+        "2. Я извлекаю из них ключевую информацию: ФИО владельца, организацию, серийный номер и срок действия.\n"
+        "3. Я формирую и отправляю вам два результата:\n"
+        "   - **Краткое сообщение** со списком сертификатов, которые скоро истекают.\n"
+        "   - **Подробный Excel-отчет** со всеми данными, где строки подсвечены цветом в зависимости от оставшегося срока действия (красный - просрочен, оранжевый - скоро истекает, зеленый - действителен).\n\n"
+        f"Пожалуйста, отправьте мне файл(ы) ({', '.join(ALLOWED_EXTENSIONS)}) или ZIP-архив для анализа."
+    )
+    await update.message.reply_text(description_text, parse_mode='Markdown')
 
 async def handle_simple_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает нажатия на простые кнопки главного меню."""
     button_text = update.message.text
     if button_text == "❓ Помощь":
         await help_command(update, context)
-    elif button_text == "Анализ сертификатов":
+    elif button_text == "📜 Анализ сертификатов":
         await request_certificate_files(update, context)
 
 def download_video_sync(url: str, ydl_opts: dict) -> str:
+    """Синхронная функция для скачивания видео с помощью yt-dlp."""
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         return ydl.prepare_filename(info)
 
 async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает полученную ссылку на YouTube видео."""
     url = update.message.text
     msg = await update.message.reply_text("Получаю информацию о видео...")
     
@@ -439,21 +537,25 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             size_in_mb = filesize / 1024 / 1024
             await msg.edit_text(f"❌ Видео '{title}' слишком большое ({size_in_mb:.1f} МБ)."); return ConversationHandler.END
 
-        context.user_data['youtube_url'] = url; context.user_data['youtube_title'] = title
+        context.user_data['youtube_url'] = url
+        context.user_data['youtube_title'] = title
         
         size_in_mb = filesize / 1024 / 1024
         keyboard = [[InlineKeyboardButton("✅ Да, скачать", callback_data='yt_confirm'), InlineKeyboardButton("❌ Нет, отмена", callback_data='yt_cancel')]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await msg.edit_message_text(f"**Название:** {title}\n**Размер:** {size_in_mb:.1f} МБ\n\nНачать скачивание?", reply_markup=reply_markup, parse_mode='Markdown')
+        await msg.edit_text(f"**Название:** {title}\n**Размер:** {size_in_mb:.1f} МБ\n\nНачать скачивание?", reply_markup=reply_markup, parse_mode='Markdown')
         return CONFIRMING_DOWNLOAD
 
     except Exception as e:
         logger.error(f"Ошибка при получении информации о YouTube видео: {e}", exc_info=True)
-        await msg.edit_message_text(f"❌ Не удалось получить информацию по ссылке: {url}"); return ConversationHandler.END
+        await msg.edit_text(f"❌ Не удалось получить информацию по ссылке: {url}"); return ConversationHandler.END
 
 async def start_download_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query; await query.answer()
-    url = context.user_data.get('youtube_url'); title = context.user_data.get('youtube_title', 'видео')
+    """Начинает скачивание видео после подтверждения."""
+    query = update.callback_query
+    await query.answer()
+    url = context.user_data.get('youtube_url')
+    title = context.user_data.get('youtube_title', 'видео')
     user_id = update.effective_user.id
 
     if not url:
@@ -468,7 +570,8 @@ async def start_download_confirmed(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text("Видео скачано. Отправляю...")
         with open(video_filename, 'rb') as video_file:
             await context.bot.send_video(chat_id=user_id, video=video_file, supports_streaming=True, read_timeout=120, write_timeout=120)
-        os.remove(video_filename); await query.message.delete()
+        os.remove(video_filename)
+        await query.message.delete()
     except Exception as e:
         logger.error(f"Ошибка при скачивании/отправке видео: {e}", exc_info=True)
         await query.edit_message_text(f"❌ Не удалось обработать видео: {url}")
@@ -476,73 +579,110 @@ async def start_download_confirmed(update: Update, context: ContextTypes.DEFAULT
     return ConversationHandler.END
 
 async def cancel_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query; await query.answer()
+    """Отменяет скачивание видео."""
+    query = update.callback_query
+    await query.answer()
     await query.edit_message_text("Скачивание отменено.")
     return ConversationHandler.END
 
 async def youtube_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Точка входа в диалог скачивания с YouTube."""
     await update.message.reply_text("Пожалуйста, отправьте ссылку на YouTube видео.")
     return AWAITING_YOUTUBE_LINK
 
 async def invalid_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает неверную ссылку на YouTube."""
     await update.message.reply_text("Это не похоже на ссылку YouTube. Пожалуйста, отправьте правильную ссылку или отмените действие.")
     return AWAITING_YOUTUBE_LINK
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает полученный документ (сертификат или архив)."""
     document = update.message.document
     if document.file_size > MAX_FILE_SIZE:
-        await update.message.reply_text(f"❌ Файл слишком большой. Максимум: {MAX_FILE_SIZE / 1024 / 1024:.0f} МБ."); return
-    user_id = update.effective_user.id; user_threshold = await get_user_threshold(user_id, context)
-    file_name = document.file_name; logger.info(f"Получен файл: {file_name} от {user_id}")
+        await update.message.reply_text(f"❌ Файл слишком большой. Максимум: {MAX_FILE_SIZE / 1024 / 1024:.0f} МБ.")
+        return
+        
+    user_id = update.effective_user.id
+    user_threshold = await get_user_threshold(user_id, context)
+    file_name = document.file_name
+    logger.info(f"Получен файл: {file_name} от {user_id}")
     await update.message.reply_text("Анализирую...")
+    
     try:
-        file_object = await context.bot.get_file(document.file_id); file_buffer = io.BytesIO()
-        await file_object.download_to_memory(file_buffer); file_buffer.seek(0)
+        file_object = await context.bot.get_file(document.file_id)
+        file_buffer = io.BytesIO()
+        await file_object.download_to_memory(file_buffer)
+        file_buffer.seek(0)
+        
         all_certs_data = _process_file_content(file_buffer.read(), file_name)
+        
         if not all_certs_data:
-            await update.message.reply_text("Не удалось найти/проанализировать сертификаты."); return
-        excel_buffer = create_excel_report(all_certs_data, user_threshold); summary_message = generate_summary_message(all_certs_data, user_threshold)
-        await update.message.reply_text(summary_message); await update.message.reply_document(document=excel_buffer, filename="Сертификаты_отчет.xlsx")
+            await update.message.reply_text("Не удалось найти/проанализировать сертификаты.")
+            return
+            
+        excel_buffer = create_excel_report(all_certs_data, user_threshold)
+        summary_message = generate_summary_message(all_certs_data, user_threshold)
+        
+        await update.message.reply_text(summary_message)
+        await update.message.reply_document(document=excel_buffer, filename="Сертификаты_отчет.xlsx")
+        
     except Exception as e:
-        logger.error(f"Ошибка при обработке документа: {e}", exc_info=True); await update.message.reply_text(f"Произошла непредвиденная ошибка.")
+        logger.error(f"Ошибка при обработке документа: {e}", exc_info=True)
+        await update.message.reply_text(f"Произошла непредвиденная ошибка.")
 
 async def handle_wrong_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает файл с неверным расширением."""
     await update.message.reply_text(f"❌ Неверный формат файла. Нужны: {', '.join(ALLOWED_EXTENSIONS)}, .zip")
 
 async def settings_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id; current_threshold = await get_user_threshold(user_id, context)
+    """Точка входа в диалог настроек."""
+    user_id = update.effective_user.id
+    current_threshold = await get_user_threshold(user_id, context)
     keyboard = [[InlineKeyboardButton("Изменить порог", callback_data='change_threshold')], [InlineKeyboardButton("Назад", callback_data='back_to_main')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(f"⚙️ **Настройки**\nТекущий порог: **{current_threshold}** дней.", reply_markup=reply_markup, parse_mode='Markdown')
     return CHOOSING_ACTION
 
 async def prompt_for_days(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query; await query.answer()
+    """Запрашивает у пользователя новое значение порога."""
+    query = update.callback_query
+    await query.answer()
     await query.edit_message_text(text="Отправьте новое число дней (например, 60).")
     return TYPING_DAYS
 
 async def set_days(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Устанавливает новый порог дней."""
     user_id = update.effective_user.id
     try:
         new_threshold = int(update.message.text)
         if new_threshold <= 0:
-            await update.message.reply_text("❌ Введите положительное число."); return TYPING_DAYS
-        context.user_data['threshold'] = new_threshold; save_user_threshold(user_id, new_threshold)
+            await update.message.reply_text("❌ Введите положительное число.")
+            return TYPING_DAYS
+            
+        context.user_data['threshold'] = new_threshold
+        save_user_threshold(user_id, new_threshold)
         await update.message.reply_html(f"✅ Порог изменен и сохранен: <b>{new_threshold}</b> дней.")
+        
     except (ValueError):
-        await update.message.reply_text("❌ Это не число. Отправьте, например: 60"); return TYPING_DAYS
+        await update.message.reply_text("❌ Это не число. Отправьте, например: 60")
+        return TYPING_DAYS
+        
     return ConversationHandler.END
 
 async def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query; await query.answer()
+    """Завершает диалог настроек."""
+    query = update.callback_query
+    await query.answer()
     await query.edit_message_text(text="Настройки закрыты.")
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отменяет текущий диалог."""
     await update.message.reply_text('Действие отменено.')
     return ConversationHandler.END
 
 async def akc_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начинает диалог создания заявки АЦК."""
     user_id = update.effective_user.id
     context.user_data['akc_form'] = {}
     
@@ -566,32 +706,40 @@ async def akc_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return AKC_SENDER_FIO
 
 async def akc_use_defaults(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query; await query.answer()
+    """Использует сохраненный шаблон для шапки заявки."""
+    query = update.callback_query
+    await query.answer()
     context.user_data['akc_form'] = context.user_data.get('akc_defaults', {})
     await query.edit_message_text("Данные шапки применены.\n\nТеперь, пожалуйста, **прикрепите файл сертификата** (.cer, .crt):", parse_mode='Markdown')
     return AKC_AWAIT_CERTIFICATE
 
 async def akc_refill_defaults(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query; await query.answer()
+    """Запускает процесс повторного заполнения шапки заявки."""
+    query = update.callback_query
+    await query.answer()
     await query.edit_message_text("Хорошо, давайте заполним данные заново.\n\nВведите **ФИО представителя учреждения**:", parse_mode='Markdown')
     return AKC_SENDER_FIO
 
 async def akc_get_sender_fio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получает ФИО представителя."""
     context.user_data['akc_form']['sender_fio'] = update.message.text
     await update.message.reply_text("Введите **полное наименование учреждения**:", parse_mode='Markdown')
     return AKC_ORG_NAME
 
 async def akc_get_org_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получает наименование организации."""
     context.user_data['akc_form']['org_name'] = update.message.text
     await update.message.reply_text("Введите **ИНН/КПП** учреждения:", parse_mode='Markdown')
     return AKC_INN_KPP
 
 async def akc_get_inn_kpp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получает ИНН/КПП."""
     context.user_data['akc_form']['inn_kpp'] = update.message.text
     await update.message.reply_text("Введите **наименование муниципального образования**:", parse_mode='Markdown')
     return AKC_MUNICIPALITY
 
 async def akc_get_municipality(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получает наименование МО и сохраняет шаблон."""
     user_id = update.effective_user.id
     context.user_data['akc_form']['municipality'] = update.message.text
     save_akc_defaults(user_id, context.user_data['akc_form'])
@@ -599,6 +747,7 @@ async def akc_get_municipality(update: Update, context: ContextTypes.DEFAULT_TYP
     return AKC_AWAIT_CERTIFICATE
 
 async def akc_get_certificate_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получает и обрабатывает файл сертификата для заявки."""
     document = update.message.document
     file_id = document.file_id
     
@@ -628,27 +777,36 @@ async def akc_get_certificate_file(update: Update, context: ContextTypes.DEFAULT
         
     except Exception as e:
         logger.error(f"Ошибка при обработке файла сертификата для заявки: {e}", exc_info=True)
-        await update.message.reply_text("❌ Произошла ошибка при обработке файла."); return AKC_AWAIT_CERTIFICATE
+        await update.message.reply_text("❌ Произошла ошибка при обработке файла.")
+        return AKC_AWAIT_CERTIFICATE
 
 async def akc_invalid_cert_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Пожалуйста, прикрепите именно файл сертификата, а не текст.")
+    """Сообщает о неверном типе файла для заявки."""
+    await update.message.reply_text("Пожалуйста, прикрепите именно файл сертификата, а не текст или архив.")
     return AKC_AWAIT_CERTIFICATE
 
 async def akc_get_role(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query; await query.answer()
-    role = query.data.split('_')[1]; context.user_data['akc_form']['role'] = role
+    """Получает роль субъекта."""
+    query = update.callback_query
+    await query.answer()
+    role = query.data.split('_')[1]
+    context.user_data['akc_form']['role'] = role
     keyboard = [[InlineKeyboardButton("АЦК-Финансы", callback_data='citp_АЦК-Финансы')], [InlineKeyboardButton("АЦК-Планирование", callback_data='citp_АЦК-Планирование')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text=f"Выбрана роль: {role}.\n\nВыберите **Наименование ЦИТП**:", reply_markup=reply_markup, parse_mode='Markdown')
     return AKC_CITP_NAME
 
 async def akc_get_citp_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query; await query.answer()
-    citp_name = query.data.split('_')[1]; context.user_data['akc_form']['citp_name'] = citp_name
+    """Получает наименование ЦИТП."""
+    query = update.callback_query
+    await query.answer()
+    citp_name = query.data.split('_')[1]
+    context.user_data['akc_form']['citp_name'] = citp_name
     await query.edit_message_text(text=f"Выбрана система: {citp_name}.\n\nВведите **имена пользователей (логины)**, через запятую:", parse_mode='Markdown')
     return AKC_LOGINS
 
 async def akc_get_logins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получает логины пользователей."""
     context.user_data['akc_form']['logins'] = update.message.text
     keyboard = [[InlineKeyboardButton("Добавить", callback_data='action_добавить'), InlineKeyboardButton("Удалить", callback_data='action_удалить')], [InlineKeyboardButton("Заменить", callback_data='action_заменить'), InlineKeyboardButton("Заблокировать", callback_data='action_заблокировать')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -656,8 +814,11 @@ async def akc_get_logins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return AKC_ACTION
 
 async def akc_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query; await query.answer()
-    action = query.data.split('_')[1]; context.user_data['akc_form']['action'] = action
+    """Завершает создание заявки, формирует и отправляет ZIP-архив."""
+    query = update.callback_query
+    await query.answer()
+    action = query.data.split('_')[1]
+    context.user_data['akc_form']['action'] = action
     await query.edit_message_text(text="Формирую ZIP-архив...")
     
     try:
@@ -690,13 +851,18 @@ async def akc_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 # --- 6. ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА ---
 async def main() -> None:
+    """Главная функция для настройки и запуска бота."""
     if not TELEGRAM_BOT_TOKEN or not DATABASE_URL:
-        logger.error("Не найден токен или URL базы данных."); return
+        logger.error("Не найден токен или URL базы данных. Проверьте переменные окружения.")
+        return
+        
     init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
+    # Общий обработчик для отмены диалогов при нажатии на кнопки меню
     cancel_handler = MessageHandler(filters.Regex('^(📜 Анализ сертификатов|🎬 Скачивание с YouTube|📄 Заявка АЦК|⚙️ Настройки анализа сертификатов|❓ Помощь)$') & user_filter, cancel)
     
+    # Диалог для настроек
     settings_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^⚙️ Настройки анализа сертификатов$') & user_filter, settings_entry)],
         states={
@@ -705,6 +871,8 @@ async def main() -> None:
         },
         fallbacks=[CommandHandler('start', start), cancel_handler],
     )
+    
+    # Диалог для скачивания с YouTube
     youtube_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^🎬 Скачивание с YouTube$') & user_filter, youtube_entry)],
         states={
@@ -714,6 +882,7 @@ async def main() -> None:
         fallbacks=[CommandHandler('start', start), cancel_handler]
     )
     
+    # Фильтр для файлов сертификатов в диалоге АЦК
     akc_cert_filter = (
         filters.Document.FileExtension("cer") |
         filters.Document.FileExtension("crt") |
@@ -721,6 +890,7 @@ async def main() -> None:
         filters.Document.FileExtension("der")
     )
     
+    # Диалог для создания заявки АЦК
     akc_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^📄 Заявка АЦК$') & user_filter, akc_start)],
         states={
@@ -729,7 +899,7 @@ async def main() -> None:
             AKC_ORG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_org_name)],
             AKC_INN_KPP: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_inn_kpp)],
             AKC_MUNICIPALITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_municipality)],
-            AKC_AWAIT_CERTIFICATE: [MessageHandler(akc_cert_filter, akc_get_certificate_file), MessageHandler(filters.Document.FileExtension("zip"), akc_invalid_cert_file)],
+            AKC_AWAIT_CERTIFICATE: [MessageHandler(akc_cert_filter, akc_get_certificate_file), MessageHandler(filters.Document.ALL, akc_invalid_cert_file)],
             AKC_ROLE: [CallbackQueryHandler(akc_get_role, pattern='^role_')],
             AKC_CITP_NAME: [CallbackQueryHandler(akc_get_citp_name, pattern='^citp_')],
             AKC_LOGINS: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_logins)],
@@ -742,12 +912,14 @@ async def main() -> None:
     application.add_handler(youtube_conv_handler)
     application.add_handler(akc_conv_handler)
     
+    # Отдельные команды и обработчики
     application.add_handler(CommandHandler("my_id", get_my_id))
     application.add_handler(CommandHandler("start", start, filters=user_filter))
     
     simple_buttons_text = "^(📜 Анализ сертификатов|❓ Помощь)$"
     application.add_handler(MessageHandler(filters.Regex(simple_buttons_text) & user_filter, handle_simple_buttons))
     
+    # Обработчик для файлов сертификатов вне диалогов
     allowed_extensions_filter = (
         filters.Document.FileExtension("zip") | filters.Document.FileExtension("cer") |
         filters.Document.FileExtension("crt") | filters.Document.FileExtension("pem") |
@@ -756,18 +928,19 @@ async def main() -> None:
     application.add_handler(MessageHandler(allowed_extensions_filter & ~filters.COMMAND & user_filter, handle_document))
     application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND & user_filter, handle_wrong_document))
 
-    try:
-        logger.info("Запускаю бота...")
-        async with application:
-            await application.start()
-            await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-            await asyncio.Future()
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Бот останавливается...")
-    except Exception as e:
-        logger.error(f"Произошла критическая ошибка: {e}", exc_info=True)
+    logger.info("Запускаю бота...")
+    # Запускаем бота до тех пор, пока пользователь не нажмет Ctrl-C.
+    # `async with` гарантирует, что приложение будет корректно запущено и остановлено.
+    async with application:
+        await application.start()
+        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        # Бот будет работать до тех пор, пока не будет остановлен извне
+        await asyncio.Future()
 
 
 # --- 7. ТОЧКА ВХОДА ---
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Бот остановлен пользователем.")
