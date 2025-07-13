@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V5.4 - С ИСПРАВЛЕННОЙ СИСТЕМОЙ ДОСТУПА)
+#  ФАЙЛ: bot.py (V5.5 - С ИСПРАВЛЕННЫМ ВЫБОРОМ ПРАВ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -1190,7 +1190,8 @@ async def toggle_permission(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     await query.answer()
     
-    perm_key = query.data.split('_')[1]
+    # Исправляем ошибку: правильно извлекаем ключ
+    perm_key = query.data.split('_', 1)[1]
     selected_perms = context.user_data['new_user_perms']
     
     if perm_key in selected_perms:
