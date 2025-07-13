@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V5.1 - С БЕЗОПАСНЫМИ ШАБЛОНАМИ ДОСТУПА)
+#  ФАЙЛ: bot.py (V5.2 - С ИНТЕГРИРОВАННЫМИ НАСТРОЙКАМИ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -55,15 +55,14 @@ logger = logging.getLogger(__name__)
 # 'cert_analysis'   - доступ к "Анализ сертификатов".
 # 'akc_form'        - доступ к "Заявка АЦК".
 # 'youtube'         - доступ к "Скачивание с YouTube".
-# 'settings'        - доступ к "Настройки анализа сертификатов".
 #
 USER_PERMISSIONS: Dict[int, Set[str]] = {
     # Администратор с полным доступом
     96238783: {"admin"},
     # Пользователь только для заявок АЦК
-    789151481: {"akc_form"}, 
+    12345678: {"akc_form"}, 
     # Пользователь для анализа сертификатов и скачивания видео
-    12345678: {"cert_analysis", "youtube"}, 
+    87654321: {"cert_analysis", "youtube"}, 
 }
 
 
@@ -106,10 +105,11 @@ YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(c
 
 # Состояния для диалогов
 (
-    CHOOSING_ACTION, TYPING_DAYS, AWAITING_YOUTUBE_LINK, CONFIRMING_DOWNLOAD,
+    AWAITING_YOUTUBE_LINK, CONFIRMING_DOWNLOAD,
     AKC_CONFIRM_DEFAULTS, AKC_SENDER_FIO, AKC_ORG_NAME, AKC_INN_KPP, AKC_MUNICIPALITY,
-    AKC_AWAIT_CERTIFICATES, AKC_ROLE, AKC_CITP_NAME, AKC_CONFIRM_LOGINS, AKC_LOGINS, AKC_ACTION
-) = range(15)
+    AKC_AWAIT_CERTIFICATES, AKC_ROLE, AKC_CITP_NAME, AKC_CONFIRM_LOGINS, AKC_LOGINS, AKC_ACTION,
+    CERT_AWAIT_FILES, CERT_AWAIT_THRESHOLD, CERT_TYPING_THRESHOLD
+) = range(16)
 
 
 # --- 3. РАБОТА С БАЗОЙ ДАННЫХ POSTGRESQL ---
@@ -540,14 +540,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     row1 = []
     if has_permission(user_id, "cert_analysis"):
         row1.append("📜 Анализ сертификатов")
-    if has_permission(user_id, "settings"):
-        row1.append("⚙️ Настройки анализа сертификатов")
+    if has_permission(user_id, "youtube"):
+        row1.append("🎬 Скачивание с YouTube")
     if row1:
         keyboard.append(row1)
 
     row2 = []
-    if has_permission(user_id, "youtube"):
-        row2.append("🎬 Скачивание с YouTube")
     if has_permission(user_id, "akc_form"):
         row2.append("📄 Заявка АЦК")
     if row2:
@@ -573,36 +571,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Нажмите кнопку, чтобы запустить пошаговый мастер создания заявки в формате DOCX.\n\n"
         "🎬 **Скачивание с YouTube**\n"
         "Нажмите кнопку и отправьте ссылку, чтобы скачать видео.\n\n"
-        "⚙️ **Настройки анализа сертификатов**\n"
-        "Измените порог оповещения об истекающих сертификатах."
     )
     await update.message.reply_text(help_text)
-
-async def request_certificate_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Отправляет пользователю подробное описание функции анализа сертификатов
-    и запрашивает файлы для анализа.
-    """
-    description_text = (
-        "**Анализ цифровых сертификатов** 📊\n\n"
-        "Эта функция предназначена для проверки сроков действия цифровых сертификатов.\n\n"
-        "**Как это работает:**\n"
-        "1. Вы отправляете мне файлы сертификатов (`.cer`, `.crt`, `.pem`, `.der`) по одному или в виде ZIP-архива.\n"
-        "2. Я извлекаю из них ключевую информацию: ФИО владельца, организацию, серийный номер и срок действия.\n"
-        "3. Я формирую и отправляю вам два результата:\n"
-        "   - **Краткое сообщение** со списком сертификатов, которые скоро истекают.\n"
-        "   - **Подробный Excel-отчет** со всеми данными, где строки подсвечены цветом в зависимости от оставшегося срока действия (красный - просрочен, оранжевый - скоро истекает, зеленый - действителен).\n\n"
-        f"Пожалуйста, отправьте мне файл(ы) ({', '.join(ALLOWED_EXTENSIONS)}) или ZIP-архив для анализа."
-    )
-    await update.message.reply_text(description_text, parse_mode='Markdown')
 
 async def handle_simple_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обрабатывает нажатия на простые кнопки главного меню."""
     button_text = update.message.text
     if button_text == "❓ Помощь":
         await help_command(update, context)
-    elif button_text == "📜 Анализ сертификатов":
-        await request_certificate_files(update, context)
 
 def download_video_sync(url: str, ydl_opts: dict) -> str:
     """Синхронная функция для скачивания видео с помощью yt-dlp."""
@@ -688,96 +664,124 @@ async def invalid_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("Это не похоже на ссылку YouTube. Пожалуйста, отправьте правильную ссылку или отмените действие.")
     return AWAITING_YOUTUBE_LINK
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обрабатывает полученный документ (сертификат или архив)."""
-    document = update.message.document
-    if document.file_size > MAX_FILE_SIZE:
-        await update.message.reply_text(f"❌ Файл слишком большой. Максимум: {MAX_FILE_SIZE / 1024 / 1024:.0f} МБ.")
-        return
-        
-    user_id = update.effective_user.id
-    user_threshold = await get_user_threshold(user_id, context)
-    file_name = document.file_name
-    logger.info(f"Получен файл: {file_name} от {user_id}")
-    await update.message.reply_text("Анализирую...")
-    
-    try:
-        file_object = await context.bot.get_file(document.file_id)
-        file_buffer = io.BytesIO()
-        await file_object.download_to_memory(file_buffer)
-        file_buffer.seek(0)
-        
-        all_certs_data = _process_file_content(file_buffer.read(), file_name)
-        
-        if not all_certs_data:
-            await update.message.reply_text("Не удалось найти/проанализировать сертификаты.")
-            return
-            
-        excel_buffer = create_excel_report(all_certs_data, user_threshold)
-        summary_message = generate_summary_message(all_certs_data, user_threshold)
-        
-        await update.message.reply_text(summary_message)
-        await update.message.reply_document(document=excel_buffer, filename="Сертификаты_отчет.xlsx")
-        
-    except Exception as e:
-        logger.error(f"Ошибка при обработке документа: {e}", exc_info=True)
-        await update.message.reply_text(f"Произошла непредвиденная ошибка.")
-
-async def handle_wrong_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обрабатывает файл с неверным расширением."""
-    await update.message.reply_text(f"❌ Неверный формат файла. Нужны: {', '.join(ALLOWED_EXTENSIONS)}, .zip")
-
-async def settings_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Точка входа в диалог настроек."""
-    user_id = update.effective_user.id
-    current_threshold = await get_user_threshold(user_id, context)
-    keyboard = [[InlineKeyboardButton("Изменить порог", callback_data='change_threshold')], [InlineKeyboardButton("Назад", callback_data='back_to_main')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(f"⚙️ **Настройки**\nТекущий порог: **{current_threshold}** дней.", reply_markup=reply_markup, parse_mode='Markdown')
-    return CHOOSING_ACTION
-
-async def prompt_for_days(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Запрашивает у пользователя новое значение порога."""
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(text="Отправьте новое число дней (например, 60).")
-    return TYPING_DAYS
-
-async def set_days(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Устанавливает новый порог дней."""
-    user_id = update.effective_user.id
-    try:
-        new_threshold = int(update.message.text)
-        if new_threshold <= 0:
-            await update.message.reply_text("❌ Введите положительное число.")
-            return TYPING_DAYS
-            
-        context.user_data['threshold'] = new_threshold
-        save_user_threshold(user_id, new_threshold)
-        await update.message.reply_html(f"✅ Порог изменен и сохранен: <b>{new_threshold}</b> дней.")
-        
-    except (ValueError):
-        await update.message.reply_text("❌ Это не число. Отправьте, например: 60")
-        return TYPING_DAYS
-        
-    return ConversationHandler.END
-
-async def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Завершает диалог настроек."""
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(text="Настройки закрыты.")
-    return ConversationHandler.END
-
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Отменяет текущий диалог."""
     await update.message.reply_text('Действие отменено.', reply_markup=ReplyKeyboardRemove())
     # Очищаем данные формы, чтобы избежать проблем при следующем запуске
     context.user_data.pop('akc_form', None)
+    context.user_data.pop('cert_analysis_data', None)
     return ConversationHandler.END
 
-# --- ЛОГИКА ДИАЛОГА ЗАЯВКИ АЦК ---
+# --- ЛОГИКА ДИАЛОГА АНАЛИЗА СЕРТИФИКАТОВ ---
+async def cert_analysis_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начинает диалог анализа сертификатов."""
+    context.user_data['cert_analysis_data'] = {'files': []}
+    keyboard = ReplyKeyboardMarkup([["Готово"]], resize_keyboard=True, one_time_keyboard=True)
+    await update.message.reply_text(
+        "**Анализ сертификатов** 📊\n\n"
+        "Отправьте мне один или несколько файлов сертификатов (.cer, .crt, .zip).\n"
+        "Когда закончите, нажмите кнопку **'Готово'**.",
+        reply_markup=keyboard,
+        parse_mode='Markdown'
+    )
+    return CERT_AWAIT_FILES
 
+async def handle_cert_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Собирает файлы для анализа."""
+    document = update.message.document
+    file_name = document.file_name
+    file_id = document.file_id
+
+    file_object = await context.bot.get_file(file_id)
+    file_buffer = io.BytesIO()
+    await file_object.download_to_memory(file_buffer)
+    
+    context.user_data['cert_analysis_data']['files'].append({
+        'name': file_name,
+        'bytes': file_buffer.getvalue()
+    })
+    
+    await update.message.reply_text(f"✅ Файл `{file_name}` добавлен. Отправьте следующий или нажмите 'Готово'.", parse_mode='Markdown')
+    return CERT_AWAIT_FILES
+
+async def ask_for_threshold_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запрашивает подтверждение порога дней."""
+    if not context.user_data['cert_analysis_data'].get('files'):
+        await update.message.reply_text("Вы не добавили ни одного файла. Действие отменено.", reply_markup=ReplyKeyboardRemove())
+        context.user_data.pop('cert_analysis_data', None)
+        return ConversationHandler.END
+
+    user_id = update.effective_user.id
+    current_threshold = await get_user_threshold(user_id, context)
+    
+    keyboard = [
+        [InlineKeyboardButton(f"✅ Использовать текущий ({current_threshold} дн.)", callback_data='cert_use_current')],
+        [InlineKeyboardButton("✏️ Ввести новый", callback_data='cert_enter_new')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "Файлы приняты. Теперь выберите порог дней для оповещения об истекающих сертификатах:",
+        reply_markup=reply_markup
+    )
+    return CERT_AWAIT_THRESHOLD
+
+async def prompt_for_new_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запрашивает новый порог дней."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Введите новое число дней (например, 60).")
+    return CERT_TYPING_THRESHOLD
+
+async def process_with_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE, threshold: int) -> int:
+    """Общая функция для обработки и создания отчета."""
+    message = update.message or update.callback_query.message
+    await message.reply_text("Анализирую...", reply_markup=ReplyKeyboardRemove())
+    
+    all_certs_data = []
+    for file_info in context.user_data['cert_analysis_data']['files']:
+        processed_data = _process_file_content(file_info['bytes'], file_info['name'])
+        all_certs_data.extend(processed_data)
+        
+    if not all_certs_data:
+        await message.reply_text("Не удалось найти/проанализировать сертификаты в отправленных файлах.")
+    else:
+        excel_buffer = create_excel_report(all_certs_data, threshold)
+        summary_message = generate_summary_message(all_certs_data, threshold)
+        await message.reply_text(summary_message)
+        await message.reply_document(document=excel_buffer, filename="Сертификаты_отчет.xlsx")
+        
+    context.user_data.pop('cert_analysis_data', None)
+    return ConversationHandler.END
+
+async def process_with_current_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает отчет с текущим порогом."""
+    query = update.callback_query
+    await query.answer()
+    await query.delete_message()
+    user_id = update.effective_user.id
+    current_threshold = await get_user_threshold(user_id, context)
+    return await process_with_threshold(update, context, current_threshold)
+
+async def set_new_threshold_and_process(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Устанавливает новый порог и обрабатывает отчет."""
+    user_id = update.effective_user.id
+    try:
+        new_threshold = int(update.message.text)
+        if new_threshold <= 0:
+            await update.message.reply_text("❌ Введите положительное число.")
+            return CERT_TYPING_THRESHOLD
+        
+        save_user_threshold(user_id, new_threshold)
+        context.user_data['threshold'] = new_threshold # Обновляем кэш
+        await update.message.reply_html(f"✅ Порог изменен и сохранен: <b>{new_threshold}</b> дней.")
+        return await process_with_threshold(update, context, new_threshold)
+
+    except (ValueError):
+        await update.message.reply_text("❌ Это не число. Отправьте, например: 60")
+        return CERT_TYPING_THRESHOLD
+
+# --- ЛОГИКА ДИАЛОГА ЗАЯВКИ АЦК ---
 async def akc_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начинает диалог создания заявки АЦК и выводит описание."""
     user_id = update.effective_user.id
@@ -1056,7 +1060,6 @@ async def akc_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         
         zip_filename = f"Заявка_АЦК_{form_data.get('sender_fio', 'пользователь')}.zip"
         
-        # Отправляем документ от имени сообщения, а не коллбэка, чтобы не было ошибок
         await context.bot.send_document(chat_id=update.effective_chat.id, document=zip_buffer, filename=zip_filename, caption="✅ Ваша заявка и сертификат в ZIP-архиве.")
         
     except Exception as e:
@@ -1076,22 +1079,32 @@ async def main() -> None:
     
     cancel_handler = MessageHandler(filters.Regex('^/cancel$') | filters.Regex('^Отмена$'), cancel)
     
-    settings_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^⚙️ Настройки анализа сертификатов$') & PermissionFilter("settings"), settings_entry)],
+    cert_analysis_conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("cert", cert_analysis_start, filters=PermissionFilter("cert_analysis")),
+            MessageHandler(filters.Regex('^📜 Анализ сертификатов$') & PermissionFilter("cert_analysis"), cert_analysis_start)
+        ],
         states={
-            CHOOSING_ACTION: [CallbackQueryHandler(prompt_for_days, pattern='^change_threshold$'), CallbackQueryHandler(end_conversation, pattern='^back_to_main$')],
-            TYPING_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_days)],
+            CERT_AWAIT_FILES: [
+                MessageHandler(filters.Document.ALL, handle_cert_upload),
+                MessageHandler(filters.Regex('^Готово$'), ask_for_threshold_confirmation)
+            ],
+            CERT_AWAIT_THRESHOLD: [
+                CallbackQueryHandler(process_with_current_threshold, pattern='^cert_use_current$'),
+                CallbackQueryHandler(prompt_for_new_threshold, pattern='^cert_enter_new$')
+            ],
+            CERT_TYPING_THRESHOLD: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_new_threshold_and_process)],
         },
-        fallbacks=[CommandHandler('start', start), cancel_handler],
+        fallbacks=[cancel_handler],
     )
-    
+
     youtube_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^🎬 Скачивание с YouTube$') & PermissionFilter("youtube"), youtube_entry)],
         states={
             AWAITING_YOUTUBE_LINK: [MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_link)],
             CONFIRMING_DOWNLOAD: [CallbackQueryHandler(start_download_confirmed, pattern='^yt_confirm$'), CallbackQueryHandler(cancel_download, pattern='^yt_cancel$')]
         },
-        fallbacks=[CommandHandler('start', start), cancel_handler]
+        fallbacks=[cancel_handler]
     )
     
     akc_cert_filter = filters.Document.FileExtension("cer") | filters.Document.FileExtension("crt")
@@ -1117,28 +1130,18 @@ async def main() -> None:
             AKC_LOGINS: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_logins)],
             AKC_ACTION: [CallbackQueryHandler(akc_get_action, pattern='^action_')],
         },
-        fallbacks=[CommandHandler('start', start), cancel_handler],
+        fallbacks=[cancel_handler],
         per_message=False
     )
     
-    application.add_handler(settings_conv_handler)
+    application.add_handler(cert_analysis_conv_handler)
     application.add_handler(youtube_conv_handler)
     application.add_handler(akc_conv_handler)
     
     application.add_handler(CommandHandler("my_id", get_my_id))
     application.add_handler(CommandHandler("start", start, filters=authorized_user_filter))
-    application.add_handler(CommandHandler("cert", request_certificate_files, filters=PermissionFilter("cert_analysis")))
     
-    application.add_handler(MessageHandler(filters.Regex("^(📜 Анализ сертификатов)$") & PermissionFilter("cert_analysis"), handle_simple_buttons))
     application.add_handler(MessageHandler(filters.Regex("^(❓ Помощь)$") & authorized_user_filter, handle_simple_buttons))
-    
-    allowed_docs_filter = (
-        filters.Document.FileExtension("zip") | filters.Document.FileExtension("cer") |
-        filters.Document.FileExtension("crt") | filters.Document.FileExtension("pem") |
-        filters.Document.FileExtension("der")
-    )
-    application.add_handler(MessageHandler(allowed_docs_filter & ~filters.COMMAND & PermissionFilter("cert_analysis"), handle_document))
-    application.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND & authorized_user_filter, handle_wrong_document))
 
     logger.info("Запускаю бота...")
     async with application:
