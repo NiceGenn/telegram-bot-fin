@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V5.5 - С ИСПРАВЛЕННЫМ ВЫБОРОМ ПРАВ)
+#  ФАЙЛ: bot.py (V5.6 - С ИСПРАВЛЕННЫМ СОХРАНЕНИЕМ ПРАВ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -713,7 +713,7 @@ async def cert_analysis_start(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data['cert_analysis_data'] = {'files': []}
     keyboard = ReplyKeyboardMarkup([["Готово"]], resize_keyboard=True, one_time_keyboard=True)
     await update.message.reply_text(
-        "**Анализ сертификатов** 📊\n\n"
+        "**Анализ сертификатов** �\n\n"
         "Отправьте мне один или несколько файлов сертификатов (.cer, .crt, .zip).\n"
         "Когда закончите, нажмите кнопку **'Готово'**.",
         reply_markup=keyboard,
@@ -1351,8 +1351,8 @@ async def main() -> None:
             ],
             AWAITING_USER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_new_user_id)],
             AWAITING_PERMISSIONS: [
-                CallbackQueryHandler(toggle_permission, pattern='^perm_'),
                 CallbackQueryHandler(save_new_user, pattern='^perm_save$'),
+                CallbackQueryHandler(toggle_permission, pattern='^perm_'),
             ],
             AWAITING_USER_TO_DELETE: [
                 CallbackQueryHandler(delete_user, pattern='^del_'),
