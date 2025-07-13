@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V5.6 - С ИСПРАВЛЕННЫМ СОХРАНЕНИЕМ ПРАВ)
+#  ФАЙЛ: bot.py (V5.7 - С УЛУЧШЕННЫМ УПРАВЛЕНИЕМ ДОСТУПОМ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -59,7 +59,7 @@ AVAILABLE_PERMISSIONS = {
 def has_permission(user_id: int, feature: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Проверяет, есть ли у пользователя доступ к функции, используя данные из context."""
     permissions_dict = context.bot_data.get('permissions', {})
-    user_permissions = permissions_dict.get(user_id, set())
+    user_permissions = permissions_dict.get(user_id, {}).get('perms', set())
     if "admin" in user_permissions:
         return True
     return feature in user_permissions
@@ -82,7 +82,7 @@ YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(c
     AKC_CONFIRM_DEFAULTS, AKC_SENDER_FIO, AKC_ORG_NAME, AKC_INN_KPP, AKC_MUNICIPALITY,
     AKC_AWAIT_CERTIFICATES, AKC_ROLE, AKC_CITP_NAME, AKC_CONFIRM_LOGINS, AKC_LOGINS, AKC_ACTION,
     CERT_AWAIT_FILES, CERT_AWAIT_THRESHOLD, CERT_TYPING_THRESHOLD,
-    ACCESS_MENU, AWAITING_USER_ID, AWAITING_PERMISSIONS, AWAITING_USER_TO_DELETE
+    ACCESS_MENU, AWAITING_FORWARD, AWAITING_PERMISSIONS, AWAITING_USER_TO_DELETE
 ) = range(20)
 
 
@@ -121,40 +121,39 @@ def init_database():
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS user_permissions (
                     user_id BIGINT PRIMARY KEY,
+                    username TEXT,
                     permissions TEXT NOT NULL
                 )
             ''')
             # Убедимся, что у главного админа есть права
             cursor.execute(
-                "INSERT INTO user_permissions (user_id, permissions) VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING;",
-                (ADMIN_USER_ID, "admin")
+                "INSERT INTO user_permissions (user_id, username, permissions) VALUES (%s, %s, %s) ON CONFLICT (user_id) DO NOTHING;",
+                (ADMIN_USER_ID, 'Главный Администратор', 'admin')
             )
-        conn.commit()
-        logger.info("База данных PostgreSQL успешно инициализирована.")
     except Exception as e:
         logger.error(f"Ошибка при инициализации таблиц: {e}")
     finally:
         if conn: conn.close()
 
-def db_load_all_permissions() -> Dict[int, Set[str]]:
+def db_load_all_permissions() -> Dict[int, Dict[str, Any]]:
     """Загружает все разрешения из базы данных."""
     conn = get_db_connection()
     if not conn: return {}
     permissions = {}
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT user_id, permissions FROM user_permissions")
+            cursor.execute("SELECT user_id, username, permissions FROM user_permissions")
             records = cursor.fetchall()
             for record in records:
-                user_id, perms_str = record
-                permissions[user_id] = set(perms_str.split(','))
+                user_id, username, perms_str = record
+                permissions[user_id] = {'name': username, 'perms': set(perms_str.split(','))}
     except Exception as e:
         logger.error(f"Ошибка при загрузке разрешений: {e}")
     finally:
         if conn: conn.close()
     return permissions
 
-def db_save_user_permissions(user_id: int, permissions: Set[str]):
+def db_save_user_permissions(user_id: int, username: str, permissions: Set[str]):
     """Сохраняет или обновляет разрешения для пользователя."""
     conn = get_db_connection()
     if not conn: return
@@ -162,12 +161,12 @@ def db_save_user_permissions(user_id: int, permissions: Set[str]):
     try:
         with conn.cursor() as cursor:
             cursor.execute(
-                "INSERT INTO user_permissions (user_id, permissions) VALUES (%s, %s) "
-                "ON CONFLICT (user_id) DO UPDATE SET permissions = EXCLUDED.permissions;",
-                (user_id, perms_str)
+                "INSERT INTO user_permissions (user_id, username, permissions) VALUES (%s, %s, %s) "
+                "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, permissions = EXCLUDED.permissions;",
+                (user_id, username, perms_str)
             )
         conn.commit()
-        logger.info(f"Разрешения для пользователя {user_id} сохранены.")
+        logger.info(f"Разрешения для пользователя {user_id} ({username}) сохранены.")
     except Exception as e:
         logger.error(f"Ошибка при сохранении разрешений для {user_id}: {e}")
     finally:
@@ -713,7 +712,7 @@ async def cert_analysis_start(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data['cert_analysis_data'] = {'files': []}
     keyboard = ReplyKeyboardMarkup([["Готово"]], resize_keyboard=True, one_time_keyboard=True)
     await update.message.reply_text(
-        "**Анализ сертификатов** �\n\n"
+        "**Анализ сертификатов** 📊\n\n"
         "Отправьте мне один или несколько файлов сертификатов (.cer, .crt, .zip).\n"
         "Когда закончите, нажмите кнопку **'Готово'**.",
         reply_markup=keyboard,
@@ -1115,10 +1114,12 @@ async def _show_access_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     
     text_lines = ["**🔑 Управление доступом**\n\nТекущие пользователи и их права:"]
     user_list_empty = True
-    for user_id, perms in permissions_dict.items():
+    for user_id, user_data in permissions_dict.items():
         user_list_empty = False
+        perms = user_data.get('perms', set())
+        name = user_data.get('name', f'Пользователь {user_id}')
         perms_str = ", ".join([AVAILABLE_PERMISSIONS.get(p, p) for p in perms])
-        text_lines.append(f"• `{user_id}`: {perms_str}")
+        text_lines.append(f"• {name} (`{user_id}`): {perms_str}")
 
     if user_list_empty:
         text_lines.append("Нет пользователей с настроенными правами.")
@@ -1147,18 +1148,18 @@ async def prompt_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Запрашивает ID нового пользователя."""
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("Введите Telegram ID нового пользователя.")
-    return AWAITING_USER_ID
+    await query.edit_message_text("Чтобы добавить нового пользователя, **перешлите мне любое его сообщение**.", parse_mode='Markdown')
+    return AWAITING_FORWARD
 
-async def get_new_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получает ID и запрашивает разрешения."""
-    try:
-        user_id = int(update.message.text)
-    except ValueError:
-        await update.message.reply_text("Это не похоже на ID. Введите число.")
-        return AWAITING_USER_ID
+async def get_forwarded_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получает ID и имя из пересланного сообщения и запрашивает разрешения."""
+    if not update.message or not update.message.forward_from:
+        await update.message.reply_text("Пожалуйста, именно перешлите сообщение, а не просто скопируйте текст.")
+        return AWAITING_FORWARD
         
-    context.user_data['new_user_id'] = user_id
+    user_to_add = update.message.forward_from
+    context.user_data['new_user_id'] = user_to_add.id
+    context.user_data['new_user_name'] = user_to_add.full_name
     context.user_data['new_user_perms'] = set()
     
     await _show_permission_selection(update, context)
@@ -1167,6 +1168,7 @@ async def get_new_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def _show_permission_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отображает клавиатуру для выбора разрешений."""
     new_user_id = context.user_data['new_user_id']
+    new_user_name = context.user_data['new_user_name']
     selected_perms = context.user_data['new_user_perms']
     
     keyboard = []
@@ -1177,20 +1179,19 @@ async def _show_permission_selection(update: Update, context: ContextTypes.DEFAU
     keyboard.append([InlineKeyboardButton("💾 Сохранить", callback_data="perm_save")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    text = f"Выберите разрешения для пользователя `{new_user_id}`:"
+    text = f"Выберите разрешения для **{new_user_name}** (`{new_user_id}`):"
     
-    # Если это первый вызов, отправляем новое сообщение. Если нет - редактируем.
+    message = update.message or update.callback_query.message
     if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        await message.edit_text(text, reply_markup=reply_markup, parse_mode='Markdown')
     else:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        await message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
 async def toggle_permission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Переключает разрешение для нового пользователя."""
     query = update.callback_query
     await query.answer()
     
-    # Исправляем ошибку: правильно извлекаем ключ
     perm_key = query.data.split('_', 1)[1]
     selected_perms = context.user_data['new_user_perms']
     
@@ -1208,16 +1209,18 @@ async def save_new_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     await query.answer()
     
     user_id = context.user_data['new_user_id']
+    username = context.user_data['new_user_name']
     permissions = context.user_data['new_user_perms']
     
     if not permissions:
         await query.edit_message_text("Вы не выбрали ни одного разрешения. Добавление отменено.")
     else:
-        db_save_user_permissions(user_id, permissions)
+        db_save_user_permissions(user_id, username, permissions)
         context.bot_data['permissions'] = db_load_all_permissions() # Обновляем кэш
-        await query.edit_message_text(f"Пользователь `{user_id}` успешно добавлен/обновлен.", parse_mode='Markdown')
+        await query.edit_message_text(f"Пользователь **{username}** (`{user_id}`) успешно добавлен/обновлен.", parse_mode='Markdown')
 
     context.user_data.pop('new_user_id', None)
+    context.user_data.pop('new_user_name', None)
     context.user_data.pop('new_user_perms', None)
     
     await _show_access_menu(update, context, message_id=query.message.message_id)
@@ -1231,9 +1234,10 @@ async def prompt_delete_user(update: Update, context: ContextTypes.DEFAULT_TYPE)
     permissions_dict = context.bot_data.get('permissions', {})
     keyboard = []
     
-    for user_id, perms in permissions_dict.items():
-        if user_id == ADMIN_USER_ID: continue # Не даем удалить главного админа
-        keyboard.append([InlineKeyboardButton(f"Удалить `{user_id}`", callback_data=f"del_{user_id}")])
+    for user_id, user_data in permissions_dict.items():
+        if user_id == ADMIN_USER_ID: continue
+        name = user_data.get('name', user_id)
+        keyboard.append([InlineKeyboardButton(f"Удалить {name} (`{user_id}`)", callback_data=f"del_{user_id}")])
         
     if not keyboard:
         await query.edit_message_text("Нет пользователей для удаления.")
@@ -1349,7 +1353,7 @@ async def main() -> None:
                 CallbackQueryHandler(prompt_delete_user, pattern='^access_delete$'),
                 CallbackQueryHandler(access_back, pattern='^access_back$'),
             ],
-            AWAITING_USER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_new_user_id)],
+            AWAITING_FORWARD: [MessageHandler(filters.FORWARDED, get_forwarded_user)],
             AWAITING_PERMISSIONS: [
                 CallbackQueryHandler(save_new_user, pattern='^perm_save$'),
                 CallbackQueryHandler(toggle_permission, pattern='^perm_'),
