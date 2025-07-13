@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V5.7 - С УЛУЧШЕННЫМ УПРАВЛЕНИЕМ ДОСТУПОМ)
+#  ФАЙЛ: bot.py (V5.8 - С ВОССТАНОВЛЕНИЕМ ДОСТУПА)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -97,7 +97,7 @@ def get_db_connection():
         return None
 
 def init_database():
-    """Инициализирует таблицы в базе данных, если они не существуют."""
+    """Инициализирует таблицы в базе данных и гарантирует наличие администратора."""
     conn = get_db_connection()
     if not conn: return
     try:
@@ -125,11 +125,16 @@ def init_database():
                     permissions TEXT NOT NULL
                 )
             ''')
-            # Убедимся, что у главного админа есть права
+            # Гарантируем, что у главного админа всегда есть права
             cursor.execute(
-                "INSERT INTO user_permissions (user_id, username, permissions) VALUES (%s, %s, %s) ON CONFLICT (user_id) DO NOTHING;",
+                """
+                INSERT INTO user_permissions (user_id, username, permissions) VALUES (%s, %s, %s) 
+                ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, permissions = EXCLUDED.permissions;
+                """,
                 (ADMIN_USER_ID, 'Главный Администратор', 'admin')
             )
+        conn.commit()
+        logger.info("База данных PostgreSQL успешно инициализирована.")
     except Exception as e:
         logger.error(f"Ошибка при инициализации таблиц: {e}")
     finally:
