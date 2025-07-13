@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V5.2 - С ИНТЕГРИРОВАННЫМИ НАСТРОЙКАМИ)
+#  ФАЙЛ: bot.py (V5.4 - С ИСПРАВЛЕННОЙ СИСТЕМОЙ ДОСТУПА)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -43,53 +43,26 @@ load_dotenv()
 # --- 2. НАСТРОЙКА И КОНСТАНТЫ ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
+ADMIN_USER_ID = 96238783  # ID главного администратора, который не может быть удален
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- СИСТЕМА РАЗРЕШЕНИЙ (ROLES/PERMISSIONS) ---
-# Определите здесь, какие функции доступны разным пользователям.
-#
-# Доступные разрешения:
-# 'admin'           - полный доступ ко всем функциям.
-# 'cert_analysis'   - доступ к "Анализ сертификатов".
-# 'akc_form'        - доступ к "Заявка АЦК".
-# 'youtube'         - доступ к "Скачивание с YouTube".
-#
-USER_PERMISSIONS: Dict[int, Set[str]] = {
-    # Администратор с полным доступом
-    96238783: {"admin"},
-    # Пользователь только для заявок АЦК
-    12345678: {"akc_form"}, 
-    # Пользователь для анализа сертификатов и скачивания видео
-    87654321: {"cert_analysis", "youtube"}, 
+AVAILABLE_PERMISSIONS = {
+    "cert_analysis": "📜 Анализ сертификатов",
+    "akc_form": "📄 Заявка АЦК",
+    "youtube": "🎬 Скачивание с YouTube",
+    "admin": "👑 Администрирование"
 }
 
-
-# Фильтр для всех пользователей, у которых есть хоть какие-то права
-authorized_user_filter = filters.User(user_id=USER_PERMISSIONS.keys())
-
-def has_permission(user_id: int, feature: str) -> bool:
-    """Проверяет, есть ли у пользователя доступ к функции."""
-    permissions = USER_PERMISSIONS.get(user_id, set())
-    if "admin" in permissions:
+def has_permission(user_id: int, feature: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Проверяет, есть ли у пользователя доступ к функции, используя данные из context."""
+    permissions_dict = context.bot_data.get('permissions', {})
+    user_permissions = permissions_dict.get(user_id, set())
+    if "admin" in user_permissions:
         return True
-    return feature in permissions
-
-class PermissionFilter(filters.BaseFilter):
-    """Кастомный фильтр для проверки разрешений пользователя."""
-    def __init__(self, feature: str):
-        self.feature = feature
-        self.data_filter = False  # Это исправляет ошибку слияния фильтров
-
-    def filter(self, message: Message) -> bool:
-        """
-        Фильтрует сообщения, проверяя, есть ли у пользователя разрешение на доступ к функции.
-        Этот фильтр предназначен для использования с MessageHandler и CommandHandler.
-        """
-        if message.from_user:
-            return has_permission(message.from_user.id, self.feature)
-        return False
+    return feature in user_permissions
 
 # -------------------------------------------------
 
@@ -108,8 +81,9 @@ YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(c
     AWAITING_YOUTUBE_LINK, CONFIRMING_DOWNLOAD,
     AKC_CONFIRM_DEFAULTS, AKC_SENDER_FIO, AKC_ORG_NAME, AKC_INN_KPP, AKC_MUNICIPALITY,
     AKC_AWAIT_CERTIFICATES, AKC_ROLE, AKC_CITP_NAME, AKC_CONFIRM_LOGINS, AKC_LOGINS, AKC_ACTION,
-    CERT_AWAIT_FILES, CERT_AWAIT_THRESHOLD, CERT_TYPING_THRESHOLD
-) = range(16)
+    CERT_AWAIT_FILES, CERT_AWAIT_THRESHOLD, CERT_TYPING_THRESHOLD,
+    ACCESS_MENU, AWAITING_USER_ID, AWAITING_PERMISSIONS, AWAITING_USER_TO_DELETE
+) = range(20)
 
 
 # --- 3. РАБОТА С БАЗОЙ ДАННЫХ POSTGRESQL ---
@@ -144,10 +118,72 @@ def init_database():
                     logins TEXT NOT NULL
                 )
             ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS user_permissions (
+                    user_id BIGINT PRIMARY KEY,
+                    permissions TEXT NOT NULL
+                )
+            ''')
+            # Убедимся, что у главного админа есть права
+            cursor.execute(
+                "INSERT INTO user_permissions (user_id, permissions) VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING;",
+                (ADMIN_USER_ID, "admin")
+            )
         conn.commit()
         logger.info("База данных PostgreSQL успешно инициализирована.")
     except Exception as e:
         logger.error(f"Ошибка при инициализации таблиц: {e}")
+    finally:
+        if conn: conn.close()
+
+def db_load_all_permissions() -> Dict[int, Set[str]]:
+    """Загружает все разрешения из базы данных."""
+    conn = get_db_connection()
+    if not conn: return {}
+    permissions = {}
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT user_id, permissions FROM user_permissions")
+            records = cursor.fetchall()
+            for record in records:
+                user_id, perms_str = record
+                permissions[user_id] = set(perms_str.split(','))
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке разрешений: {e}")
+    finally:
+        if conn: conn.close()
+    return permissions
+
+def db_save_user_permissions(user_id: int, permissions: Set[str]):
+    """Сохраняет или обновляет разрешения для пользователя."""
+    conn = get_db_connection()
+    if not conn: return
+    perms_str = ",".join(sorted(list(permissions)))
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO user_permissions (user_id, permissions) VALUES (%s, %s) "
+                "ON CONFLICT (user_id) DO UPDATE SET permissions = EXCLUDED.permissions;",
+                (user_id, perms_str)
+            )
+        conn.commit()
+        logger.info(f"Разрешения для пользователя {user_id} сохранены.")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении разрешений для {user_id}: {e}")
+    finally:
+        if conn: conn.close()
+
+def db_delete_user(user_id: int):
+    """Удаляет пользователя из таблицы разрешений."""
+    conn = get_db_connection()
+    if not conn: return
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM user_permissions WHERE user_id = %s", (user_id,))
+        conn.commit()
+        logger.info(f"Пользователь {user_id} удален.")
+    except Exception as e:
+        logger.error(f"Ошибка при удалении пользователя {user_id}: {e}")
     finally:
         if conn: conn.close()
 
@@ -535,23 +571,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     user_id = user.id
     
-    # Динамическое формирование клавиатуры на основе разрешений
     keyboard = []
-    row1 = []
-    if has_permission(user_id, "cert_analysis"):
+    row1, row2, row3 = [], [], []
+    
+    if has_permission(user_id, "cert_analysis", context):
         row1.append("📜 Анализ сертификатов")
-    if has_permission(user_id, "youtube"):
-        row1.append("🎬 Скачивание с YouTube")
+    if has_permission(user_id, "akc_form", context):
+        row1.append("📄 Заявка АЦК")
     if row1:
         keyboard.append(row1)
 
-    row2 = []
-    if has_permission(user_id, "akc_form"):
-        row2.append("📄 Заявка АЦК")
+    if has_permission(user_id, "youtube", context):
+        row2.append("🎬 Скачивание с YouTube")
     if row2:
         keyboard.append(row2)
         
-    keyboard.append(["❓ Помощь"]) # Помощь доступна всем авторизованным пользователям
+    if has_permission(user_id, "admin", context):
+        row3.append("🔑 Управление доступом")
+    row3.append("❓ Помощь")
+    keyboard.append(row3)
 
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     start_message = (
@@ -571,14 +609,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Нажмите кнопку, чтобы запустить пошаговый мастер создания заявки в формате DOCX.\n\n"
         "🎬 **Скачивание с YouTube**\n"
         "Нажмите кнопку и отправьте ссылку, чтобы скачать видео.\n\n"
+        "🔑 **Управление доступом** (только для администраторов)\n"
+        "Позволяет добавлять и удалять пользователей, а также настраивать их права."
     )
     await update.message.reply_text(help_text)
-
-async def handle_simple_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обрабатывает нажатия на простые кнопки главного меню."""
-    button_text = update.message.text
-    if button_text == "❓ Помощь":
-        await help_command(update, context)
 
 def download_video_sync(url: str, ydl_opts: dict) -> str:
     """Синхронная функция для скачивания видео с помощью yt-dlp."""
@@ -656,6 +690,7 @@ async def cancel_download(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def youtube_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Точка входа в диалог скачивания с YouTube."""
+    if not has_permission(update.effective_user.id, "youtube", context): return ConversationHandler.END
     await update.message.reply_text("Пожалуйста, отправьте ссылку на YouTube видео.")
     return AWAITING_YOUTUBE_LINK
 
@@ -668,13 +703,13 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Отменяет текущий диалог."""
     await update.message.reply_text('Действие отменено.', reply_markup=ReplyKeyboardRemove())
     # Очищаем данные формы, чтобы избежать проблем при следующем запуске
-    context.user_data.pop('akc_form', None)
-    context.user_data.pop('cert_analysis_data', None)
+    context.user_data.clear()
     return ConversationHandler.END
 
 # --- ЛОГИКА ДИАЛОГА АНАЛИЗА СЕРТИФИКАТОВ ---
 async def cert_analysis_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начинает диалог анализа сертификатов."""
+    if not has_permission(update.effective_user.id, "cert_analysis", context): return ConversationHandler.END
     context.user_data['cert_analysis_data'] = {'files': []}
     keyboard = ReplyKeyboardMarkup([["Готово"]], resize_keyboard=True, one_time_keyboard=True)
     await update.message.reply_text(
@@ -784,6 +819,7 @@ async def set_new_threshold_and_process(update: Update, context: ContextTypes.DE
 # --- ЛОГИКА ДИАЛОГА ЗАЯВКИ АЦК ---
 async def akc_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начинает диалог создания заявки АЦК и выводит описание."""
+    if not has_permission(update.effective_user.id, "akc_form", context): return ConversationHandler.END
     user_id = update.effective_user.id
     context.user_data['akc_form'] = {
         'certificates': [] # Инициализируем список для сертификатов
@@ -1066,6 +1102,169 @@ async def akc_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         logger.error(f"Ошибка при создании или отправке ZIP-архива: {e}", exc_info=True)
         await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Произошла ошибка при создании архива.")
 
+# --- ЛОГИКА ДИАЛОГА УПРАВЛЕНИЯ ДОСТУПОМ ---
+async def access_management_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начинает диалог управления доступом."""
+    if not has_permission(update.effective_user.id, "admin", context): return ConversationHandler.END
+    await _show_access_menu(update, context)
+    return ACCESS_MENU
+
+async def _show_access_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, message_id: int = None):
+    """Отображает меню управления доступом со списком пользователей."""
+    permissions_dict = context.bot_data.get('permissions', {})
+    
+    text_lines = ["**🔑 Управление доступом**\n\nТекущие пользователи и их права:"]
+    user_list_empty = True
+    for user_id, perms in permissions_dict.items():
+        user_list_empty = False
+        perms_str = ", ".join([AVAILABLE_PERMISSIONS.get(p, p) for p in perms])
+        text_lines.append(f"• `{user_id}`: {perms_str}")
+
+    if user_list_empty:
+        text_lines.append("Нет пользователей с настроенными правами.")
+
+    keyboard = [
+        [InlineKeyboardButton("➕ Добавить пользователя", callback_data='access_add')],
+        [InlineKeyboardButton("❌ Удалить пользователя", callback_data='access_delete')],
+        [InlineKeyboardButton("⬅️ Назад в главное меню", callback_data='access_back')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    message = update.message or update.callback_query.message
+    if message_id:
+        await context.bot.edit_message_text(chat_id=message.chat_id, message_id=message_id, text="\n".join(text_lines), reply_markup=reply_markup, parse_mode='Markdown')
+    else:
+        await message.reply_text("\n".join(text_lines), reply_markup=reply_markup, parse_mode='Markdown')
+
+async def access_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Возвращает в главное меню."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Возврат в главное меню.")
+    return ConversationHandler.END
+
+async def prompt_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запрашивает ID нового пользователя."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Введите Telegram ID нового пользователя.")
+    return AWAITING_USER_ID
+
+async def get_new_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получает ID и запрашивает разрешения."""
+    try:
+        user_id = int(update.message.text)
+    except ValueError:
+        await update.message.reply_text("Это не похоже на ID. Введите число.")
+        return AWAITING_USER_ID
+        
+    context.user_data['new_user_id'] = user_id
+    context.user_data['new_user_perms'] = set()
+    
+    await _show_permission_selection(update, context)
+    return AWAITING_PERMISSIONS
+
+async def _show_permission_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отображает клавиатуру для выбора разрешений."""
+    new_user_id = context.user_data['new_user_id']
+    selected_perms = context.user_data['new_user_perms']
+    
+    keyboard = []
+    for perm_key, perm_name in AVAILABLE_PERMISSIONS.items():
+        is_selected = "✅" if perm_key in selected_perms else "☑️"
+        keyboard.append([InlineKeyboardButton(f"{is_selected} {perm_name}", callback_data=f"perm_{perm_key}")])
+    
+    keyboard.append([InlineKeyboardButton("💾 Сохранить", callback_data="perm_save")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    text = f"Выберите разрешения для пользователя `{new_user_id}`:"
+    
+    # Если это первый вызов, отправляем новое сообщение. Если нет - редактируем.
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    else:
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+async def toggle_permission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Переключает разрешение для нового пользователя."""
+    query = update.callback_query
+    await query.answer()
+    
+    perm_key = query.data.split('_')[1]
+    selected_perms = context.user_data['new_user_perms']
+    
+    if perm_key in selected_perms:
+        selected_perms.remove(perm_key)
+    else:
+        selected_perms.add(perm_key)
+        
+    await _show_permission_selection(update, context)
+    return AWAITING_PERMISSIONS
+
+async def save_new_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Сохраняет нового пользователя и его права."""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = context.user_data['new_user_id']
+    permissions = context.user_data['new_user_perms']
+    
+    if not permissions:
+        await query.edit_message_text("Вы не выбрали ни одного разрешения. Добавление отменено.")
+    else:
+        db_save_user_permissions(user_id, permissions)
+        context.bot_data['permissions'] = db_load_all_permissions() # Обновляем кэш
+        await query.edit_message_text(f"Пользователь `{user_id}` успешно добавлен/обновлен.", parse_mode='Markdown')
+
+    context.user_data.pop('new_user_id', None)
+    context.user_data.pop('new_user_perms', None)
+    
+    await _show_access_menu(update, context, message_id=query.message.message_id)
+    return ACCESS_MENU
+
+async def prompt_delete_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Показывает список пользователей для удаления."""
+    query = update.callback_query
+    await query.answer()
+    
+    permissions_dict = context.bot_data.get('permissions', {})
+    keyboard = []
+    
+    for user_id, perms in permissions_dict.items():
+        if user_id == ADMIN_USER_ID: continue # Не даем удалить главного админа
+        keyboard.append([InlineKeyboardButton(f"Удалить `{user_id}`", callback_data=f"del_{user_id}")])
+        
+    if not keyboard:
+        await query.edit_message_text("Нет пользователей для удаления.")
+        await _show_access_menu(update, context, message_id=query.message.message_id)
+        return ACCESS_MENU
+        
+    keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data='access_show_menu')])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text("Выберите пользователя для удаления:", reply_markup=reply_markup, parse_mode='Markdown')
+    return AWAITING_USER_TO_DELETE
+
+async def delete_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Удаляет выбранного пользователя."""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id_to_delete = int(query.data.split('_')[1])
+    
+    db_delete_user(user_id_to_delete)
+    context.bot_data['permissions'] = db_load_all_permissions() # Обновляем кэш
+    
+    await query.edit_message_text(f"Пользователь `{user_id_to_delete}` удален.", parse_mode='Markdown')
+    
+    await _show_access_menu(update, context, message_id=query.message.message_id)
+    return ACCESS_MENU
+
+async def return_to_access_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Возвращает к главному меню управления доступом."""
+    query = update.callback_query
+    await query.answer()
+    await _show_access_menu(update, context, message_id=query.message.message_id)
+    return ACCESS_MENU
 
 # --- 6. ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА ---
 async def main() -> None:
@@ -1075,14 +1274,21 @@ async def main() -> None:
         return
         
     init_database()
+    
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
+    # Загружаем разрешения в кэш при старте
+    application.bot_data['permissions'] = db_load_all_permissions()
+    
+    # Создаем фильтр на основе загруженных пользователей
+    authorized_user_filter = filters.User(user_id=application.bot_data['permissions'].keys())
+
     cancel_handler = MessageHandler(filters.Regex('^/cancel$') | filters.Regex('^Отмена$'), cancel)
     
     cert_analysis_conv_handler = ConversationHandler(
         entry_points=[
-            CommandHandler("cert", cert_analysis_start, filters=PermissionFilter("cert_analysis")),
-            MessageHandler(filters.Regex('^📜 Анализ сертификатов$') & PermissionFilter("cert_analysis"), cert_analysis_start)
+            CommandHandler("cert", cert_analysis_start),
+            MessageHandler(filters.Regex('^📜 Анализ сертификатов$'), cert_analysis_start)
         ],
         states={
             CERT_AWAIT_FILES: [
@@ -1099,7 +1305,7 @@ async def main() -> None:
     )
 
     youtube_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^🎬 Скачивание с YouTube$') & PermissionFilter("youtube"), youtube_entry)],
+        entry_points=[MessageHandler(filters.Regex('^🎬 Скачивание с YouTube$'), youtube_entry)],
         states={
             AWAITING_YOUTUBE_LINK: [MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_link)],
             CONFIRMING_DOWNLOAD: [CallbackQueryHandler(start_download_confirmed, pattern='^yt_confirm$'), CallbackQueryHandler(cancel_download, pattern='^yt_cancel$')]
@@ -1110,7 +1316,7 @@ async def main() -> None:
     akc_cert_filter = filters.Document.FileExtension("cer") | filters.Document.FileExtension("crt")
     
     akc_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^📄 Заявка АЦК$') & PermissionFilter("akc_form"), akc_start)],
+        entry_points=[MessageHandler(filters.Regex('^📄 Заявка АЦК$'), akc_start)],
         states={
             AKC_CONFIRM_DEFAULTS: [CallbackQueryHandler(akc_use_defaults, pattern='^akc_use_defaults$'), CallbackQueryHandler(akc_refill_defaults, pattern='^akc_refill$')],
             AKC_SENDER_FIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_sender_fio)],
@@ -1133,15 +1339,37 @@ async def main() -> None:
         fallbacks=[cancel_handler],
         per_message=False
     )
-    
+
+    access_management_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex('^🔑 Управление доступом$'), access_management_start)],
+        states={
+            ACCESS_MENU: [
+                CallbackQueryHandler(prompt_add_user, pattern='^access_add$'),
+                CallbackQueryHandler(prompt_delete_user, pattern='^access_delete$'),
+                CallbackQueryHandler(access_back, pattern='^access_back$'),
+            ],
+            AWAITING_USER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_new_user_id)],
+            AWAITING_PERMISSIONS: [
+                CallbackQueryHandler(toggle_permission, pattern='^perm_'),
+                CallbackQueryHandler(save_new_user, pattern='^perm_save$'),
+            ],
+            AWAITING_USER_TO_DELETE: [
+                CallbackQueryHandler(delete_user, pattern='^del_'),
+                CallbackQueryHandler(return_to_access_menu, pattern='^access_show_menu$'),
+            ]
+        },
+        fallbacks=[cancel_handler]
+    )
+
     application.add_handler(cert_analysis_conv_handler)
     application.add_handler(youtube_conv_handler)
     application.add_handler(akc_conv_handler)
+    application.add_handler(access_management_conv)
     
     application.add_handler(CommandHandler("my_id", get_my_id))
     application.add_handler(CommandHandler("start", start, filters=authorized_user_filter))
     
-    application.add_handler(MessageHandler(filters.Regex("^(❓ Помощь)$") & authorized_user_filter, handle_simple_buttons))
+    application.add_handler(MessageHandler(filters.Regex("^(❓ Помощь)$") & authorized_user_filter, help_command))
 
     logger.info("Запускаю бота...")
     async with application:
