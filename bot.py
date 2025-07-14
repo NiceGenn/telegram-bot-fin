@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V5.8 - С ВОССТАНОВЛЕНИЕМ ДОСТУПА)
+#  ФАЙЛ: bot.py (V5.9 - С ГИБКИМ УПРАВЛЕНИЕМ ДОСТУПОМ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -20,7 +20,7 @@ from docx.enum.section import WD_ORIENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm, Pt
 
-from telegram import Update, ReplyKeyboardMarkup, Message, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, ReplyKeyboardMarkup, Message, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove, MessageOriginUser
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -82,7 +82,7 @@ YOUTUBE_URL_PATTERN = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(c
     AKC_CONFIRM_DEFAULTS, AKC_SENDER_FIO, AKC_ORG_NAME, AKC_INN_KPP, AKC_MUNICIPALITY,
     AKC_AWAIT_CERTIFICATES, AKC_ROLE, AKC_CITP_NAME, AKC_CONFIRM_LOGINS, AKC_LOGINS, AKC_ACTION,
     CERT_AWAIT_FILES, CERT_AWAIT_THRESHOLD, CERT_TYPING_THRESHOLD,
-    ACCESS_MENU, AWAITING_FORWARD, AWAITING_PERMISSIONS, AWAITING_USER_TO_DELETE
+    ACCESS_MENU, AWAITING_USER_INFO, AWAITING_PERMISSIONS, AWAITING_USER_TO_DELETE
 ) = range(20)
 
 
@@ -1150,21 +1150,40 @@ async def access_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return ConversationHandler.END
 
 async def prompt_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Запрашивает ID нового пользователя."""
+    """Запрашивает способ добавления нового пользователя."""
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("Чтобы добавить нового пользователя, **перешлите мне любое его сообщение**.", parse_mode='Markdown')
-    return AWAITING_FORWARD
+    await query.edit_message_text(
+        "**Способ добавления пользователя:**\n\n"
+        "1. **Переслать сообщение** - самый простой способ, бот автоматически определит ID и имя.\n"
+        "2. **Ввести ID вручную** - если у вас есть только ID пользователя.\n\n"
+        "Пожалуйста, перешлите сообщение или отправьте ID.",
+        parse_mode='Markdown'
+    )
+    return AWAITING_USER_INFO
 
-async def get_forwarded_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получает ID и имя из пересланного сообщения и запрашивает разрешения."""
-    if not update.message or not update.message.forward_from:
-        await update.message.reply_text("Пожалуйста, именно перешлите сообщение, а не просто скопируйте текст.")
-        return AWAITING_FORWARD
-        
-    user_to_add = update.message.forward_from
-    context.user_data['new_user_id'] = user_to_add.id
-    context.user_data['new_user_name'] = user_to_add.full_name
+async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает пересланное сообщение или введенный ID."""
+    user_to_add = None
+    user_id = None
+    user_name = None
+
+    # Проверяем, переслано ли сообщение
+    if update.message.forward_origin and isinstance(update.message.forward_origin, MessageOriginUser):
+        user_to_add = update.message.forward_origin.sender_user
+        user_id = user_to_add.id
+        user_name = user_to_add.full_name
+    # Если нет, пытаемся обработать как ID
+    else:
+        try:
+            user_id = int(update.message.text)
+            user_name = f"Пользователь {user_id}" # Имя по умолчанию для ручного ввода
+        except (ValueError, TypeError):
+            await update.message.reply_text("Не удалось распознать. Пожалуйста, либо перешлите сообщение, либо введите корректный ID.")
+            return AWAITING_USER_INFO
+            
+    context.user_data['new_user_id'] = user_id
+    context.user_data['new_user_name'] = user_name
     context.user_data['new_user_perms'] = set()
     
     await _show_permission_selection(update, context)
@@ -1187,10 +1206,9 @@ async def _show_permission_selection(update: Update, context: ContextTypes.DEFAU
     text = f"Выберите разрешения для **{new_user_name}** (`{new_user_id}`):"
     
     message = update.message or update.callback_query.message
-    if update.callback_query:
-        await message.edit_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-    else:
-        await message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    # Удаляем предыдущее сообщение (с просьбой переслать) и отправляем новое
+    await message.delete()
+    await message.chat.send_message(text, reply_markup=reply_markup, parse_mode='Markdown')
 
 async def toggle_permission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Переключает разрешение для нового пользователя."""
@@ -1224,9 +1242,7 @@ async def save_new_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         context.bot_data['permissions'] = db_load_all_permissions() # Обновляем кэш
         await query.edit_message_text(f"Пользователь **{username}** (`{user_id}`) успешно добавлен/обновлен.", parse_mode='Markdown')
 
-    context.user_data.pop('new_user_id', None)
-    context.user_data.pop('new_user_name', None)
-    context.user_data.pop('new_user_perms', None)
+    context.user_data.clear()
     
     await _show_access_menu(update, context, message_id=query.message.message_id)
     return ACCESS_MENU
@@ -1358,7 +1374,10 @@ async def main() -> None:
                 CallbackQueryHandler(prompt_delete_user, pattern='^access_delete$'),
                 CallbackQueryHandler(access_back, pattern='^access_back$'),
             ],
-            AWAITING_FORWARD: [MessageHandler(filters.FORWARDED, get_forwarded_user)],
+            AWAITING_USER_INFO: [
+                MessageHandler(filters.FORWARDED, get_user_info),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_user_info)
+            ],
             AWAITING_PERMISSIONS: [
                 CallbackQueryHandler(save_new_user, pattern='^perm_save$'),
                 CallbackQueryHandler(toggle_permission, pattern='^perm_'),
