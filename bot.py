@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V5.9 - С ГИБКИМ УПРАВЛЕНИЕМ ДОСТУПОМ)
+#  ФАЙЛ: bot.py (V6.0 - С ДИНАМИЧЕСКОЙ АВТОРИЗАЦИЕЙ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -575,6 +575,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     user_id = user.id
     
+    # Динамическая проверка, есть ли у пользователя вообще какие-либо права
+    if user_id not in context.bot_data.get('permissions', {}):
+        return ConversationHandler.END # Молча игнорируем неавторизованных
+
     keyboard = []
     row1, row2, row3 = [], [], []
     
@@ -605,6 +609,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик кнопки 'Помощь'. Отправляет справочную информацию."""
+    if update.effective_user.id not in context.bot_data.get('permissions', {}): return
+
     help_text = (
         "Я могу помочь вам с несколькими задачами:\n\n"
         "📜 **Анализ сертификатов**\n"
@@ -1164,23 +1170,22 @@ async def prompt_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обрабатывает пересланное сообщение или введенный ID."""
-    user_to_add = None
     user_id = None
     user_name = None
 
-    # Проверяем, переслано ли сообщение
+    # Проверяем, переслано ли сообщение от известного пользователя
     if update.message.forward_origin and isinstance(update.message.forward_origin, MessageOriginUser):
         user_to_add = update.message.forward_origin.sender_user
         user_id = user_to_add.id
         user_name = user_to_add.full_name
-    # Если нет, пытаемся обработать как ID
+    # Если нет, пытаемся обработать как ID, введенный текстом
     else:
         try:
             user_id = int(update.message.text)
             user_name = f"Пользователь {user_id}" # Имя по умолчанию для ручного ввода
         except (ValueError, TypeError):
-            await update.message.reply_text("Не удалось распознать. Пожалуйста, либо перешлите сообщение, либо введите корректный ID.")
-            return AWAITING_USER_INFO
+            await update.message.reply_text("Не удалось распознать. Пожалуйста, либо перешлите сообщение от пользователя, либо введите корректный ID.")
+            return AWAITING_USER_INFO # Остаемся в том же состоянии, ожидая правильного ввода
             
     context.user_data['new_user_id'] = user_id
     context.user_data['new_user_name'] = user_name
@@ -1306,9 +1311,6 @@ async def main() -> None:
     # Загружаем разрешения в кэш при старте
     application.bot_data['permissions'] = db_load_all_permissions()
     
-    # Создаем фильтр на основе загруженных пользователей
-    authorized_user_filter = filters.User(user_id=application.bot_data['permissions'].keys())
-
     cancel_handler = MessageHandler(filters.Regex('^/cancel$') | filters.Regex('^Отмена$'), cancel)
     
     cert_analysis_conv_handler = ConversationHandler(
@@ -1396,9 +1398,9 @@ async def main() -> None:
     application.add_handler(access_management_conv)
     
     application.add_handler(CommandHandler("my_id", get_my_id))
-    application.add_handler(CommandHandler("start", start, filters=authorized_user_filter))
+    application.add_handler(CommandHandler("start", start))
     
-    application.add_handler(MessageHandler(filters.Regex("^(❓ Помощь)$") & authorized_user_filter, help_command))
+    application.add_handler(MessageHandler(filters.Regex("^(❓ Помощь)$"), help_command))
 
     logger.info("Запускаю бота...")
     async with application:
