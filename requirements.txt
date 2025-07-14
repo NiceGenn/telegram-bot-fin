@@ -1,9 +1,7 @@
 python-telegram-bot
-python-dotenv
-cryptography
-openpyxl
-fastapi
-uvicorn
 psycopg2-binary
 yt-dlp
 python-docx
+cryptography
+openpyxl
+python-dotenv
