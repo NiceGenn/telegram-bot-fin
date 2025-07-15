@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V8.0 - БЕЗ ФУНКЦИИ МОНИТОРИНГА)
+#  ФАЙЛ: bot.py (V8.1 - ИСПРАВЛЕН ЗАПУСК)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -44,7 +44,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_USER_ID = 96238783  # ID главного администратора, который не может быть удален
-BOT_VERSION = "v8.0"  # Версия бота для отображения в справке
+BOT_VERSION = "v8.1"  # Версия бота для отображения в справке
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1350,192 +1350,6 @@ async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     
     return ACCESS_MENU
 
-# --- ЛОГИКА МОНИТОРИНГА СЕРВЕРОВ ---
-async def check_web_service(url: str, auth_config: Dict[str, str], timeout: int = 10) -> bool:
-    """Выполняет полный цикл проверки (login -> check -> logout) для WEB-клиентов."""
-    login_url = urljoin(url, 'login')
-    logout_url = urljoin(url, 'logout')
-    
-    login = auth_config.get('login', 'nobody')
-    password = auth_config.get('password', '')
-    magic = auth_config.get('magic', 'ver3:')
-    
-    # Правильное хеширование: MD5 от пароля, затем конкатенация с magic
-    md5_hash = hashlib.md5(password.encode('ascii')).hexdigest().upper()
-    hashed_password = f"{magic}{md5_hash}"
-    
-    payload = {'loginUsername': login, 'loginPassword': hashed_password, 'rememberLogin': 'false'}
-    
-    try:
-        async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
-            login_response = await client.post(login_url, data=payload)
-            if login_response.status_code >= 400 or '"success":true' not in login_response.text.lower().replace(" ", ""):
-                logger.warning(f"WEB login failed for {login_url}. Status: {login_response.status_code}, Body: {login_response.text[:200]}")
-                return False
-            try:
-                await client.get(logout_url)
-            except Exception: pass
-        return True
-    except (httpx.RequestError, httpx.TimeoutException) as e:
-        logger.warning(f"WEB check failed for {url}: {e}")
-        return False
-
-async def check_exec_service(url: str, auth_config: Dict[str, str], timeout: int = 10) -> bool:
-    """Проверяет доступность Delphi-сервиса, ожидая ответ <ok/>."""
-    login = auth_config.get('login', 'nobody')
-    password = auth_config.get('password', '')
-    magic = auth_config.get('magic', 'ver3:')
-    
-    # Правильное хеширование
-    md5_hash = hashlib.md5(password.encode('ascii')).hexdigest().upper()
-    hashed_password = f"{magic}{md5_hash}"
-    
-    payload = {
-        "method": "job_process",
-        "sessionId": "0",
-        "task": f"$SESSIONPROVIDER action='authentication' LOGIN='{login}' PASSWORD='{hashed_password}' BUDGET_ID='0'"
-    }
-    
-    try:
-        async with httpx.AsyncClient(verify=False) as client:
-            response = await client.post(url, data=payload, timeout=timeout)
-            if response.status_code == 200 and "<ok/>" in response.text:
-                return True
-            else:
-                logger.warning(f"Exec check for {url} failed. Status: {response.status_code}, Body: {response.text[:100]}")
-                return False
-    except (httpx.RequestError, httpx.TimeoutException) as e:
-        logger.warning(f"Exec check failed for {url}: {e}")
-        return False
-
-async def check_tcp(host: str, port: int, timeout: int = 10) -> bool:
-    """Проверяет доступность TCP-порта."""
-    try:
-        _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
-        writer.close()
-        await writer.wait_closed()
-        return True
-    except (asyncio.TimeoutError, ConnectionRefusedError, OSError) as e:
-        logger.warning(f"TCP check failed for {host}:{port}: {e}")
-        return False
-
-async def run_monitoring_checks() -> Tuple[str, Dict[str, bool]]:
-    """Запускает все проверки из файла конфигурации."""
-    config = configparser.ConfigParser()
-    config_path = 'monitoring_config.ini'
-    if not os.path.exists(config_path):
-        logger.error(f"Файл конфигурации {config_path} не найден.")
-        return f"❌ Файл конфигурации `{config_path}` не найден.", {}
-        
-    config.read(config_path)
-    
-    auth_config = dict(config.items('WEB_Auth')) if config.has_section('WEB_Auth') else {}
-    
-    tasks = []
-    checks_info = []
-
-    for section in config.sections():
-        if section == 'WEB_Auth' or not config.getboolean(section, 'enabled', fallback=False):
-            continue
-        
-        name = config.get(section, 'name', fallback=section)
-        
-        if config.has_option(section, 'http_address'):
-            url = config.get(section, 'http_address')
-            tasks.append(check_exec_service(url, auth_config))
-            checks_info.append({'group': name, 'type': 'HTTP', 'address': url})
-            
-        if config.has_option(section, 'web_address'):
-            url = config.get(section, 'web_address')
-            tasks.append(check_web_service(url, auth_config))
-            checks_info.append({'group': name, 'type': 'WEB', 'address': url})
-            
-        if config.has_option(section, 'tcp_servers'):
-            servers = config.get(section, 'tcp_servers').split(',')
-            for server in servers:
-                server = server.strip()
-                if ':' in server:
-                    host, port_str = server.split(':', 1)
-                    try:
-                        port = int(port_str)
-                        tasks.append(check_tcp(host, port))
-                        checks_info.append({'group': name, 'type': 'TCP', 'address': f"{host}:{port}"})
-                    except ValueError:
-                        logger.error(f"Invalid port in config for {server}")
-        
-    if not tasks:
-        return "Нет активных серверов для проверки в `monitoring_config.ini`.", {}
-
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    report_by_group = {}
-    current_statuses = {}
-
-    for i, check in enumerate(checks_info):
-        status = results[i] is True
-        status_icon = "✅" if status else "❌"
-        group = check['group']
-        check_type = check['type']
-        address = check['address']
-        
-        if group not in report_by_group:
-            report_by_group[group] = []
-        
-        report_by_group[group].append(f"  `{check_type}`: {address} - {status_icon}")
-        current_statuses[f"{group}_{check_type}_{address}"] = status
-
-    message_parts = ["**🖥️ Результаты мониторинга:**\n"]
-    for group, lines in report_by_group.items():
-        message_parts.append(f"**{group}**")
-        message_parts.extend(lines)
-        message_parts.append("")
-
-    return "\n".join(message_parts), current_statuses
-
-async def monitoring_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик для ручного запуска мониторинга."""
-    if not has_permission(update.effective_user.id, "monitoring", context): return
-    
-    logger.info(f"User {update.effective_user.id} triggered manual monitoring.")
-    msg = await update.message.reply_text("Начинаю проверку серверов, пожалуйста, подождите...")
-    report, _ = await run_monitoring_checks()
-    await msg.edit_text(report, parse_mode='Markdown')
-
-async def scheduled_monitoring_check(context: ContextTypes.DEFAULT_TYPE):
-    """Функция для автоматического мониторинга по расписанию."""
-    logger.info("Running scheduled monitoring check...")
-    report, current_statuses = await run_monitoring_checks()
-    
-    last_statuses = context.bot_data.get('last_monitoring_statuses', {})
-    
-    notifications = []
-    for check_key, current_status in current_statuses.items():
-        last_status = last_statuses.get(check_key)
-        
-        if last_status is not None and last_status != current_status:
-            group, check_type, address = check_key.split('_', 2)
-            if current_status is False:
-                notifications.append(f"❌ **Сбой:** Сервис `{check_type}` системы **{group}** по адресу `{address}` стал недоступен!")
-            else:
-                notifications.append(f"✅ **Восстановление:** Сервис `{check_type}` системы **{group}** по адресу `{address}` снова доступен.")
-
-    if notifications:
-        message = "🚨 **Обновление статуса систем мониторинга:**\n\n" + "\n".join(notifications)
-        admins = [uid for uid, data in context.bot_data.get('permissions', {}).items() if 'admin' in data.get('perms', set())]
-        for admin_id in admins:
-            try:
-                await context.bot.send_message(chat_id=admin_id, text=message, parse_mode='Markdown')
-            except Exception as e:
-                logger.error(f"Failed to send monitoring alert to {admin_id}: {e}")
-
-    context.bot_data['last_monitoring_statuses'] = current_statuses
-    logger.info("Scheduled monitoring check finished.")
-
-async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отвечает на неизвестные текстовые сообщения."""
-    if update.effective_user.id not in context.bot_data.get('permissions', {}): return
-    await update.message.reply_text("Извините, я не понимаю эту команду. Пожалуйста, используйте кнопки меню.")
-
 # --- 6. ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА ---
 async def main() -> None:
     """Главная функция для настройки и запуска бота."""
@@ -1548,7 +1362,6 @@ async def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     application.bot_data['permissions'] = db_load_all_permissions()
-    application.bot_data['last_monitoring_statuses'] = {}
 
     cancel_handler = CommandHandler("cancel", cancel)
     
@@ -1641,16 +1454,11 @@ async def main() -> None:
     application.add_handler(CommandHandler(["start", "menu"], start))
     
     application.add_handler(MessageHandler(filters.Text(AVAILABLE_PERMISSIONS["help"]), help_command))
-    application.add_handler(MessageHandler(filters.Text(AVAILABLE_PERMISSIONS["monitoring"]), monitoring_start))
-    application.add_handler(CommandHandler("monitor", monitoring_start))
     
     # Обработчик для неизвестных текстовых команд
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_command))
 
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(scheduled_monitoring_check, 'interval', minutes=5, args=[application])
-    
-    logger.info("Запускаю бота и планировщик...")
+    logger.info("Запускаю бота...")
     async with application:
         await application.initialize()
         
@@ -1663,7 +1471,6 @@ async def main() -> None:
         except Exception as e:
             logger.error(f"Failed to send startup notification: {e}")
 
-        scheduler.start()
         await application.start()
         await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
         await asyncio.Future()
