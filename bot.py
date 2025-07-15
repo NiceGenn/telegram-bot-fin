@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V6.0 - С ДИНАМИЧЕСКОЙ АВТОРИЗАЦИЕЙ)
+#  ФАЙЛ: bot.py (V6.1 - С ИНТЕГРАЦИЕЙ МОНИТОРИНГА)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -16,6 +16,8 @@ import telegram
 import uuid
 import time
 import docx
+import configparser
+import httpx
 from docx.enum.section import WD_ORIENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm, Pt
@@ -36,6 +38,7 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
 from dotenv import load_dotenv
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 load_dotenv()
 
@@ -53,6 +56,7 @@ AVAILABLE_PERMISSIONS = {
     "cert_analysis": "📜 Анализ сертификатов",
     "akc_form": "📄 Заявка АЦК",
     "youtube": "🎬 Скачивание с YouTube",
+    "monitoring": "🖥️ Мониторинг серверов",
     "admin": "👑 Администрирование"
 }
 
@@ -575,9 +579,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     user_id = user.id
     
-    # Динамическая проверка, есть ли у пользователя вообще какие-либо права
     if user_id not in context.bot_data.get('permissions', {}):
-        return ConversationHandler.END # Молча игнорируем неавторизованных
+        return ConversationHandler.END
 
     keyboard = []
     row1, row2, row3 = [], [], []
@@ -591,6 +594,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     if has_permission(user_id, "youtube", context):
         row2.append("🎬 Скачивание с YouTube")
+    if has_permission(user_id, "monitoring", context):
+        row2.append("🖥️ Мониторинг серверов")
     if row2:
         keyboard.append(row2)
         
@@ -619,6 +624,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Нажмите кнопку, чтобы запустить пошаговый мастер создания заявки в формате DOCX.\n\n"
         "🎬 **Скачивание с YouTube**\n"
         "Нажмите кнопку и отправьте ссылку, чтобы скачать видео.\n\n"
+        "🖥️ **Мониторинг серверов**\n"
+        "Проверка доступности систем по кнопке и автоматические оповещения о сбоях.\n\n"
         "🔑 **Управление доступом** (только для администраторов)\n"
         "Позволяет добавлять и удалять пользователей, а также настраивать их права."
     )
@@ -1415,5 +1422,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен пользователем.")
-        
-        
