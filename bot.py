@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V7.0 - С ПРОДВИНУТЫМ МОНИТОРИНГОМ)
+#  ФАЙЛ: bot.py (V7.1 - С КОРРЕКТНЫМ МОНИТОРИНГОМ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -49,7 +49,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_USER_ID = 96238783  # ID главного администратора, который не может быть удален
-BOT_VERSION = "v7.0"  # Версия бота для отображения в справке
+BOT_VERSION = "v7.1"  # Версия бота для отображения в справке
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
