@@ -5,5 +5,3 @@ python-docx
 cryptography
 openpyxl
 python-dotenv
-apscheduler
-httpx

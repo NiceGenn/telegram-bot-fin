@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V7.1 - С КОРРЕКТНЫМ МОНИТОРИНГОМ)
+#  ФАЙЛ: bot.py (V8.0 - БЕЗ ФУНКЦИИ МОНИТОРИНГА)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -16,10 +16,6 @@ import telegram
 import uuid
 import time
 import docx
-import configparser
-import httpx
-import hashlib
-from urllib.parse import urljoin
 from docx.enum.section import WD_ORIENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm, Pt
@@ -40,7 +36,6 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
 from dotenv import load_dotenv
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 load_dotenv()
 
@@ -49,7 +44,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_USER_ID = 96238783  # ID главного администратора, который не может быть удален
-BOT_VERSION = "v7.1"  # Версия бота для отображения в справке
+BOT_VERSION = "v8.0"  # Версия бота для отображения в справке
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -58,9 +53,9 @@ logger = logging.getLogger(__name__)
 AVAILABLE_PERMISSIONS = {
     "cert_analysis": "📜 Анализ сертификатов",
     "akc_form": "📄 Заявка АЦК",
-    "monitoring": "🖥️ Мониторинг серверов",
     "youtube": "🎬 Скачивание с YouTube",
-    "admin": "👑 Администрирование"
+    "admin": "🔑 Управление доступом",
+    "help": "❓ Помощь"
 }
 
 def has_permission(user_id: int, feature: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -589,22 +584,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     row1, row2, row3 = [], [], []
     
     if has_permission(user_id, "cert_analysis", context):
-        row1.append("📜 Анализ сертификатов")
+        row1.append(AVAILABLE_PERMISSIONS["cert_analysis"])
     if has_permission(user_id, "akc_form", context):
-        row1.append("📄 Заявка АЦК")
+        row1.append(AVAILABLE_PERMISSIONS["akc_form"])
     if row1:
         keyboard.append(row1)
 
     if has_permission(user_id, "monitoring", context):
-        row2.append("🖥️ Мониторинг серверов")
+        row2.append(AVAILABLE_PERMISSIONS["monitoring"])
     if has_permission(user_id, "admin", context):
-        row2.append("🔑 Управление доступом")
+        row2.append(AVAILABLE_PERMISSIONS["admin"])
     if row2:
         keyboard.append(row2)
         
     if has_permission(user_id, "youtube", context):
-        row3.append("🎬 Скачивание с YouTube")
-    row3.append("❓ Помощь")
+        row3.append(AVAILABLE_PERMISSIONS["youtube"])
+    row3.append(AVAILABLE_PERMISSIONS["help"])
     keyboard.append(row3)
 
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -1365,16 +1360,17 @@ async def check_web_service(url: str, auth_config: Dict[str, str], timeout: int 
     password = auth_config.get('password', '')
     magic = auth_config.get('magic', 'ver3:')
     
-    to_hash = (magic + password).encode('ascii')
-    hashed = hashlib.md5(to_hash).hexdigest().upper()
+    # Правильное хеширование: MD5 от пароля, затем конкатенация с magic
+    md5_hash = hashlib.md5(password.encode('ascii')).hexdigest().upper()
+    hashed_password = f"{magic}{md5_hash}"
     
-    payload = {'loginUsername': login, 'loginPassword': hashed, 'rememberLogin': 'false'}
+    payload = {'loginUsername': login, 'loginPassword': hashed_password, 'rememberLogin': 'false'}
     
     try:
         async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
             login_response = await client.post(login_url, data=payload)
-            if login_response.status_code >= 400 or '"success":true' not in login_response.text.replace(" ", ""):
-                logger.warning(f"WEB login failed for {login_url}. Status: {login_response.status_code}, Body: {login_response.text[:100]}")
+            if login_response.status_code >= 400 or '"success":true' not in login_response.text.lower().replace(" ", ""):
+                logger.warning(f"WEB login failed for {login_url}. Status: {login_response.status_code}, Body: {login_response.text[:200]}")
                 return False
             try:
                 await client.get(logout_url)
@@ -1389,8 +1385,10 @@ async def check_exec_service(url: str, auth_config: Dict[str, str], timeout: int
     login = auth_config.get('login', 'nobody')
     password = auth_config.get('password', '')
     magic = auth_config.get('magic', 'ver3:')
-    to_hash = (magic + password).encode('ascii')
-    hashed_password = hashlib.md5(to_hash).hexdigest().upper()
+    
+    # Правильное хеширование
+    md5_hash = hashlib.md5(password.encode('ascii')).hexdigest().upper()
+    hashed_password = f"{magic}{md5_hash}"
     
     payload = {
         "method": "job_process",
@@ -1533,6 +1531,11 @@ async def scheduled_monitoring_check(context: ContextTypes.DEFAULT_TYPE):
     context.bot_data['last_monitoring_statuses'] = current_statuses
     logger.info("Scheduled monitoring check finished.")
 
+async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отвечает на неизвестные текстовые сообщения."""
+    if update.effective_user.id not in context.bot_data.get('permissions', {}): return
+    await update.message.reply_text("Извините, я не понимаю эту команду. Пожалуйста, используйте кнопки меню.")
+
 # --- 6. ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА ---
 async def main() -> None:
     """Главная функция для настройки и запуска бота."""
@@ -1547,12 +1550,12 @@ async def main() -> None:
     application.bot_data['permissions'] = db_load_all_permissions()
     application.bot_data['last_monitoring_statuses'] = {}
 
-    cancel_handler = MessageHandler(filters.Regex('^/cancel$') | filters.Regex('^Отмена$'), cancel)
+    cancel_handler = CommandHandler("cancel", cancel)
     
     cert_analysis_conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("cert", cert_analysis_start),
-            MessageHandler(filters.Text("📜 Анализ сертификатов"), cert_analysis_start)
+            MessageHandler(filters.Text(AVAILABLE_PERMISSIONS["cert_analysis"]), cert_analysis_start)
         ],
         states={
             CERT_AWAIT_FILES: [
@@ -1569,7 +1572,7 @@ async def main() -> None:
     )
 
     youtube_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Text("🎬 Скачивание с YouTube"), youtube_entry)],
+        entry_points=[MessageHandler(filters.Text(AVAILABLE_PERMISSIONS["youtube"]), youtube_entry)],
         states={
             AWAITING_YOUTUBE_LINK: [MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_link)],
             CONFIRMING_DOWNLOAD: [CallbackQueryHandler(start_download_confirmed, pattern='^yt_confirm$'), CallbackQueryHandler(cancel_download, pattern='^yt_cancel$')]
@@ -1580,7 +1583,7 @@ async def main() -> None:
     akc_cert_filter = filters.Document.FileExtension("cer") | filters.Document.FileExtension("crt")
     
     akc_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Text("📄 Заявка АЦК"), akc_start)],
+        entry_points=[MessageHandler(filters.Text(AVAILABLE_PERMISSIONS["akc_form"]), akc_start)],
         states={
             AKC_CONFIRM_DEFAULTS: [CallbackQueryHandler(akc_use_defaults, pattern='^akc_use_defaults$'), CallbackQueryHandler(akc_refill_defaults, pattern='^akc_refill$')],
             AKC_SENDER_FIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_sender_fio)],
@@ -1605,7 +1608,7 @@ async def main() -> None:
     )
 
     access_management_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Text("🔑 Управление доступом"), access_management_start)],
+        entry_points=[MessageHandler(filters.Text(AVAILABLE_PERMISSIONS["admin"]), access_management_start)],
         states={
             ACCESS_MENU: [
                 CallbackQueryHandler(prompt_add_user, pattern='^access_add$'),
@@ -1635,11 +1638,14 @@ async def main() -> None:
     application.add_handler(access_management_conv)
     
     application.add_handler(CommandHandler("my_id", get_my_id))
-    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler(["start", "menu"], start))
     
-    application.add_handler(MessageHandler(filters.Text("❓ Помощь"), help_command))
-    application.add_handler(MessageHandler(filters.Text("🖥️ Мониторинг серверов"), monitoring_start))
+    application.add_handler(MessageHandler(filters.Text(AVAILABLE_PERMISSIONS["help"]), help_command))
+    application.add_handler(MessageHandler(filters.Text(AVAILABLE_PERMISSIONS["monitoring"]), monitoring_start))
     application.add_handler(CommandHandler("monitor", monitoring_start))
+    
+    # Обработчик для неизвестных текстовых команд
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_command))
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(scheduled_monitoring_check, 'interval', minutes=5, args=[application])
