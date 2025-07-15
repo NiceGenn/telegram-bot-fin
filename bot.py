@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V6.4 - С ИСПРАВЛЕННЫМ МОНИТОРИНГОМ)
+#  ФАЙЛ: bot.py (V6.5 - С ВЕРСИЕЙ В СПРАВКЕ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -47,6 +47,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_USER_ID = 96238783  # ID главного администратора, который не может быть удален
+BOT_VERSION = "v6.5"  # Версия бота для отображения в справке
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -644,8 +645,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "🔑 **Управление доступом** (только для администраторов)\n"
             "Позволяет добавлять и удалять пользователей, а также настраивать их права."
         )
+    
+    help_text_parts.append(f"\n_Версия бота: {BOT_VERSION}_")
         
-    await update.message.reply_text("\n\n".join(help_text_parts))
+    await update.message.reply_text("\n\n".join(help_text_parts), parse_mode='Markdown')
 
 def download_video_sync(url: str, ydl_opts: dict) -> str:
     """Синхронная функция для скачивания видео с помощью yt-dlp."""
