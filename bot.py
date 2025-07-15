@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V8.1 - ИСПРАВЛЕН ЗАПУСК)
+#  ФАЙЛ: bot.py (V8.2 - ИСПРАВЛЕН ЗАПУСК)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -44,7 +44,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_USER_ID = 96238783  # ID главного администратора, который не может быть удален
-BOT_VERSION = "v8.1"  # Версия бота для отображения в справке
+BOT_VERSION = "v8.2"  # Версия бота для отображения в справке
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1349,6 +1349,11 @@ async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         logger.info("Bot service restart command issued successfully.")
     
     return ACCESS_MENU
+
+async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отвечает на неизвестные текстовые сообщения."""
+    if update.effective_user.id not in context.bot_data.get('permissions', {}): return
+    await update.message.reply_text("Извините, я не понимаю эту команду. Пожалуйста, используйте кнопки меню.")
 
 # --- 6. ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА ---
 async def main() -> None:
