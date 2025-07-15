@@ -1356,8 +1356,8 @@ async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return ACCESS_MENU
 
 # --- ЛОГИКА МОНИТОРИНГА СЕРВЕРОВ ---
-async def check_azk_service(url: str, auth_config: Dict[str, str], timeout: int = 10) -> bool:
-    """Выполняет полный цикл проверки (login -> check -> logout) для сервисов АЦК."""
+async def check_web_service(url: str, auth_config: Dict[str, str], timeout: int = 10) -> bool:
+    """Выполняет полный цикл проверки (login -> check -> logout) для WEB-клиентов."""
     login_url = urljoin(url, 'login')
     logout_url = urljoin(url, 'logout')
     
@@ -1365,39 +1365,49 @@ async def check_azk_service(url: str, auth_config: Dict[str, str], timeout: int 
     password = auth_config.get('password', '')
     magic = auth_config.get('magic', 'ver3:')
     
-    # Создаем хеш пароля
     to_hash = (magic + password).encode('ascii')
     hashed = hashlib.md5(to_hash).hexdigest().upper()
     
-    payload = {
-        'loginUsername': login,
-        'loginPassword': hashed,
-        'rememberLogin': 'false'
-    }
+    payload = {'loginUsername': login, 'loginPassword': hashed, 'rememberLogin': 'false'}
     
     try:
         async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
-            # 1. Логин
             login_response = await client.post(login_url, data=payload)
-            if login_response.status_code >= 400:
-                logger.warning(f"Login failed for {login_url} with status {login_response.status_code}")
+            if login_response.status_code >= 400 or '"success":true' not in login_response.text.replace(" ", ""):
+                logger.warning(f"WEB login failed for {login_url}. Status: {login_response.status_code}, Body: {login_response.text[:100]}")
                 return False
-            
-            # 2. Проверка ответа
-            response_text = login_response.text
-            if '"success":true' not in response_text.replace(" ", ""):
-                logger.warning(f"Login to {login_url} was not successful. Response: {response_text[:200]}")
-                return False
-                
-            # 3. Выход (независимо от результата, для очистки сессии)
             try:
                 await client.get(logout_url)
-            except Exception:
-                pass # Ошибки при выходе игнорируем
-
+            except Exception: pass
         return True
     except (httpx.RequestError, httpx.TimeoutException) as e:
-        logger.warning(f"AZK check failed for {url}: {e}")
+        logger.warning(f"WEB check failed for {url}: {e}")
+        return False
+
+async def check_exec_service(url: str, auth_config: Dict[str, str], timeout: int = 10) -> bool:
+    """Проверяет доступность Delphi-сервиса, ожидая ответ <ok/>."""
+    login = auth_config.get('login', 'nobody')
+    password = auth_config.get('password', '')
+    magic = auth_config.get('magic', 'ver3:')
+    to_hash = (magic + password).encode('ascii')
+    hashed_password = hashlib.md5(to_hash).hexdigest().upper()
+    
+    payload = {
+        "method": "job_process",
+        "sessionId": "0",
+        "task": f"$SESSIONPROVIDER action='authentication' LOGIN='{login}' PASSWORD='{hashed_password}' BUDGET_ID='0'"
+    }
+    
+    try:
+        async with httpx.AsyncClient(verify=False) as client:
+            response = await client.post(url, data=payload, timeout=timeout)
+            if response.status_code == 200 and "<ok/>" in response.text:
+                return True
+            else:
+                logger.warning(f"Exec check for {url} failed. Status: {response.status_code}, Body: {response.text[:100]}")
+                return False
+    except (httpx.RequestError, httpx.TimeoutException) as e:
+        logger.warning(f"Exec check failed for {url}: {e}")
         return False
 
 async def check_tcp(host: str, port: int, timeout: int = 10) -> bool:
@@ -1434,12 +1444,12 @@ async def run_monitoring_checks() -> Tuple[str, Dict[str, bool]]:
         
         if config.has_option(section, 'http_address'):
             url = config.get(section, 'http_address')
-            tasks.append(check_azk_service(url, auth_config))
+            tasks.append(check_exec_service(url, auth_config))
             checks_info.append({'group': name, 'type': 'HTTP', 'address': url})
             
         if config.has_option(section, 'web_address'):
             url = config.get(section, 'web_address')
-            tasks.append(check_azk_service(url, auth_config))
+            tasks.append(check_web_service(url, auth_config))
             checks_info.append({'group': name, 'type': 'WEB', 'address': url})
             
         if config.has_option(section, 'tcp_servers'):
