@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V6.5 - С ВЕРСИЕЙ В СПРАВКЕ)
+#  ФАЙЛ: bot.py (V7.0 - С ПРОДВИНУТЫМ МОНИТОРИНГОМ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -18,6 +18,8 @@ import time
 import docx
 import configparser
 import httpx
+import hashlib
+from urllib.parse import urljoin
 from docx.enum.section import WD_ORIENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm, Pt
@@ -47,7 +49,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_USER_ID = 96238783  # ID главного администратора, который не может быть удален
-BOT_VERSION = "v6.5"  # Версия бота для отображения в справке
+BOT_VERSION = "v7.0"  # Версия бота для отображения в справке
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1164,6 +1166,7 @@ async def _show_access_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     keyboard = [
         [InlineKeyboardButton("➕ Добавить пользователя", callback_data='access_add')],
         [InlineKeyboardButton("❌ Удалить пользователя", callback_data='access_delete')],
+        [InlineKeyboardButton("🔄 Перезапустить бота", callback_data='access_restart')],
         [InlineKeyboardButton("⬅️ Назад в главное меню", callback_data='access_back')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1323,27 +1326,78 @@ async def return_to_access_menu(update: Update, context: ContextTypes.DEFAULT_TY
     await _show_access_menu(update, context, message_id=query.message.message_id)
     return ACCESS_MENU
 
-# --- ЛОГИКА МОНИТОРИНГА СЕРВЕРОВ ---
-async def check_get_request(url: str, timeout: int = 10) -> bool:
-    """Проверяет доступность URL с помощью GET-запроса, игнорируя ошибки SSL."""
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
-    try:
-        async with httpx.AsyncClient(verify=False) as client:
-            response = await client.get(url, timeout=timeout, headers=headers, follow_redirects=True)
-            return response.status_code < 400
-    except (httpx.RequestError, httpx.TimeoutException) as e:
-        logger.warning(f"GET check failed for {url}: {e}")
-        return False
+async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Перезапускает системную службу бота."""
+    query = update.callback_query
+    user_id = update.effective_user.id
 
-async def check_post_request(url: str, timeout: int = 10) -> bool:
-    """Проверяет доступность URL с помощью POST-запроса, игнорируя ошибки SSL."""
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+    if user_id != ADMIN_USER_ID:
+        await query.answer("Эта функция доступна только главному администратору.", show_alert=True)
+        return ACCESS_MENU
+
+    await query.answer("Перезапускаю бота...")
+    await query.edit_message_text("🤖 Перезапускаю бота... Пожалуйста, подождите. Я отправлю сообщение, когда буду снова в сети.")
+    
+    await asyncio.sleep(1)
+
+    command = "sudo systemctl restart cert-bot.service"
+    proc = await asyncio.create_subprocess_shell(
+        command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        logger.error(f"Failed to restart bot service. Stderr: {stderr.decode()}")
+    else:
+        logger.info("Bot service restart command issued successfully.")
+    
+    return ACCESS_MENU
+
+# --- ЛОГИКА МОНИТОРИНГА СЕРВЕРОВ ---
+async def check_azk_service(url: str, auth_config: Dict[str, str], timeout: int = 10) -> bool:
+    """Выполняет полный цикл проверки (login -> check -> logout) для сервисов АЦК."""
+    login_url = urljoin(url, 'login')
+    logout_url = urljoin(url, 'logout')
+    
+    login = auth_config.get('login', 'nobody')
+    password = auth_config.get('password', '')
+    magic = auth_config.get('magic', 'ver3:')
+    
+    # Создаем хеш пароля
+    to_hash = (magic + password).encode('ascii')
+    hashed = hashlib.md5(to_hash).hexdigest().upper()
+    
+    payload = {
+        'loginUsername': login,
+        'loginPassword': hashed,
+        'rememberLogin': 'false'
+    }
+    
     try:
-        async with httpx.AsyncClient(verify=False) as client:
-            response = await client.post(url, timeout=timeout, headers=headers)
-            return response.status_code < 500
+        async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
+            # 1. Логин
+            login_response = await client.post(login_url, data=payload)
+            if login_response.status_code >= 400:
+                logger.warning(f"Login failed for {login_url} with status {login_response.status_code}")
+                return False
+            
+            # 2. Проверка ответа
+            response_text = login_response.text
+            if '"success":true' not in response_text.replace(" ", ""):
+                logger.warning(f"Login to {login_url} was not successful. Response: {response_text[:200]}")
+                return False
+                
+            # 3. Выход (независимо от результата, для очистки сессии)
+            try:
+                await client.get(logout_url)
+            except Exception:
+                pass # Ошибки при выходе игнорируем
+
+        return True
     except (httpx.RequestError, httpx.TimeoutException) as e:
-        logger.warning(f"POST check failed for {url}: {e}")
+        logger.warning(f"AZK check failed for {url}: {e}")
         return False
 
 async def check_tcp(host: str, port: int, timeout: int = 10) -> bool:
@@ -1367,23 +1421,25 @@ async def run_monitoring_checks() -> Tuple[str, Dict[str, bool]]:
         
     config.read(config_path)
     
+    auth_config = dict(config.items('WEB_Auth')) if config.has_section('WEB_Auth') else {}
+    
     tasks = []
     checks_info = []
 
     for section in config.sections():
-        if not config.getboolean(section, 'enabled', fallback=False):
+        if section == 'WEB_Auth' or not config.getboolean(section, 'enabled', fallback=False):
             continue
         
         name = config.get(section, 'name', fallback=section)
         
         if config.has_option(section, 'http_address'):
             url = config.get(section, 'http_address')
-            tasks.append(check_post_request(url))
+            tasks.append(check_azk_service(url, auth_config))
             checks_info.append({'group': name, 'type': 'HTTP', 'address': url})
             
         if config.has_option(section, 'web_address'):
             url = config.get(section, 'web_address')
-            tasks.append(check_get_request(url))
+            tasks.append(check_azk_service(url, auth_config))
             checks_info.append({'group': name, 'type': 'WEB', 'address': url})
             
         if config.has_option(section, 'tcp_servers'):
@@ -1544,6 +1600,7 @@ async def main() -> None:
             ACCESS_MENU: [
                 CallbackQueryHandler(prompt_add_user, pattern='^access_add$'),
                 CallbackQueryHandler(prompt_delete_user, pattern='^access_delete$'),
+                CallbackQueryHandler(restart_bot, pattern='^access_restart$'),
                 CallbackQueryHandler(access_back, pattern='^access_back$'),
             ],
             AWAITING_USER_INFO: [
@@ -1579,6 +1636,17 @@ async def main() -> None:
     
     logger.info("Запускаю бота и планировщик...")
     async with application:
+        await application.initialize()
+        
+        try:
+            await application.bot.send_message(
+                chat_id=ADMIN_USER_ID,
+                text=f"✅ Бот успешно запущен/перезапущен.\nВерсия: {BOT_VERSION}"
+            )
+            logger.info("Startup notification sent to admin.")
+        except Exception as e:
+            logger.error(f"Failed to send startup notification: {e}")
+
         scheduler.start()
         await application.start()
         await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
