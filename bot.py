@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V8.2 - ИСПРАВЛЕН ЗАПУСК)
+#  ФАЙЛ: bot.py (V8.3 - ФИНАЛЬНАЯ ВЕРСИЯ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -44,7 +44,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_USER_ID = 96238783  # ID главного администратора, который не может быть удален
-BOT_VERSION = "v8.2"  # Версия бота для отображения в справке
+BOT_VERSION = "v8.3"  # Версия бота для отображения в справке
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -590,8 +590,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if row1:
         keyboard.append(row1)
 
-    if has_permission(user_id, "monitoring", context):
-        row2.append(AVAILABLE_PERMISSIONS["monitoring"])
     if has_permission(user_id, "admin", context):
         row2.append(AVAILABLE_PERMISSIONS["admin"])
     if row2:
@@ -631,11 +629,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         help_text_parts.append(
             "🎬 **Скачивание с YouTube**\n"
             "Нажмите кнопку и отправьте ссылку, чтобы скачать видео."
-        )
-    if has_permission(user_id, "monitoring", context):
-        help_text_parts.append(
-            "🖥️ **Мониторинг серверов**\n"
-            "Проверка доступности систем по кнопке и автоматические оповещения о сбоях."
         )
     if has_permission(user_id, "admin", context):
         help_text_parts.append(
