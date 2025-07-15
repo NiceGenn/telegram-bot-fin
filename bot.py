@@ -1,5 +1,5 @@
 # =================================================================================
-#  ФАЙЛ: bot.py (V6.1 - С ИНТЕГРАЦИЕЙ МОНИТОРИНГА)
+#  ФАЙЛ: bot.py (V6.4 - С ИСПРАВЛЕННЫМ МОНИТОРИНГОМ)
 # =================================================================================
 
 # --- 1. ИМПОРТЫ ---
@@ -55,8 +55,8 @@ logger = logging.getLogger(__name__)
 AVAILABLE_PERMISSIONS = {
     "cert_analysis": "📜 Анализ сертификатов",
     "akc_form": "📄 Заявка АЦК",
-    "youtube": "🎬 Скачивание с YouTube",
     "monitoring": "🖥️ Мониторинг серверов",
+    "youtube": "🎬 Скачивание с YouTube",
     "admin": "👑 Администрирование"
 }
 
@@ -592,15 +592,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if row1:
         keyboard.append(row1)
 
-    if has_permission(user_id, "youtube", context):
-        row2.append("🎬 Скачивание с YouTube")
     if has_permission(user_id, "monitoring", context):
         row2.append("🖥️ Мониторинг серверов")
+    if has_permission(user_id, "admin", context):
+        row2.append("🔑 Управление доступом")
     if row2:
         keyboard.append(row2)
         
-    if has_permission(user_id, "admin", context):
-        row3.append("🔑 Управление доступом")
+    if has_permission(user_id, "youtube", context):
+        row3.append("🎬 Скачивание с YouTube")
     row3.append("❓ Помощь")
     keyboard.append(row3)
 
@@ -613,23 +613,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик кнопки 'Помощь'. Отправляет справочную информацию."""
-    if update.effective_user.id not in context.bot_data.get('permissions', {}): return
+    """Обработчик кнопки 'Помощь'. Отправляет персонализированную справочную информацию."""
+    user_id = update.effective_user.id
+    if user_id not in context.bot_data.get('permissions', {}): return
 
-    help_text = (
-        "Я могу помочь вам с несколькими задачами:\n\n"
-        "📜 **Анализ сертификатов**\n"
-        "Нажмите кнопку и отправьте файлы `.cer`, `.crt` или `.zip`-архив для создания Excel-отчета.\n\n"
-        "📄 **Заявка АЦК**\n"
-        "Нажмите кнопку, чтобы запустить пошаговый мастер создания заявки в формате DOCX.\n\n"
-        "🎬 **Скачивание с YouTube**\n"
-        "Нажмите кнопку и отправьте ссылку, чтобы скачать видео.\n\n"
-        "🖥️ **Мониторинг серверов**\n"
-        "Проверка доступности систем по кнопке и автоматические оповещения о сбоях.\n\n"
-        "🔑 **Управление доступом** (только для администраторов)\n"
-        "Позволяет добавлять и удалять пользователей, а также настраивать их права."
-    )
-    await update.message.reply_text(help_text)
+    help_text_parts = ["Я могу помочь вам со следующими задачами:\n"]
+    
+    if has_permission(user_id, "cert_analysis", context):
+        help_text_parts.append(
+            "📜 **Анализ сертификатов**\n"
+            "Нажмите кнопку и отправьте файлы `.cer`, `.crt` или `.zip`-архив для создания Excel-отчета."
+        )
+    if has_permission(user_id, "akc_form", context):
+        help_text_parts.append(
+            "📄 **Заявка АЦК**\n"
+            "Нажмите кнопку, чтобы запустить пошаговый мастер создания заявки в формате DOCX."
+        )
+    if has_permission(user_id, "youtube", context):
+        help_text_parts.append(
+            "🎬 **Скачивание с YouTube**\n"
+            "Нажмите кнопку и отправьте ссылку, чтобы скачать видео."
+        )
+    if has_permission(user_id, "monitoring", context):
+        help_text_parts.append(
+            "🖥️ **Мониторинг серверов**\n"
+            "Проверка доступности систем по кнопке и автоматические оповещения о сбоях."
+        )
+    if has_permission(user_id, "admin", context):
+        help_text_parts.append(
+            "🔑 **Управление доступом** (только для администраторов)\n"
+            "Позволяет добавлять и удалять пользователей, а также настраивать их права."
+        )
+        
+    await update.message.reply_text("\n\n".join(help_text_parts))
 
 def download_video_sync(url: str, ydl_opts: dict) -> str:
     """Синхронная функция для скачивания видео с помощью yt-dlp."""
@@ -1304,6 +1320,150 @@ async def return_to_access_menu(update: Update, context: ContextTypes.DEFAULT_TY
     await _show_access_menu(update, context, message_id=query.message.message_id)
     return ACCESS_MENU
 
+# --- ЛОГИКА МОНИТОРИНГА СЕРВЕРОВ ---
+async def check_get_request(url: str, timeout: int = 10) -> bool:
+    """Проверяет доступность URL с помощью GET-запроса, игнорируя ошибки SSL."""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+    try:
+        async with httpx.AsyncClient(verify=False) as client:
+            response = await client.get(url, timeout=timeout, headers=headers, follow_redirects=True)
+            return response.status_code < 400
+    except (httpx.RequestError, httpx.TimeoutException) as e:
+        logger.warning(f"GET check failed for {url}: {e}")
+        return False
+
+async def check_post_request(url: str, timeout: int = 10) -> bool:
+    """Проверяет доступность URL с помощью POST-запроса, игнорируя ошибки SSL."""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+    try:
+        async with httpx.AsyncClient(verify=False) as client:
+            response = await client.post(url, timeout=timeout, headers=headers)
+            return response.status_code < 500
+    except (httpx.RequestError, httpx.TimeoutException) as e:
+        logger.warning(f"POST check failed for {url}: {e}")
+        return False
+
+async def check_tcp(host: str, port: int, timeout: int = 10) -> bool:
+    """Проверяет доступность TCP-порта."""
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except (asyncio.TimeoutError, ConnectionRefusedError, OSError) as e:
+        logger.warning(f"TCP check failed for {host}:{port}: {e}")
+        return False
+
+async def run_monitoring_checks() -> Tuple[str, Dict[str, bool]]:
+    """Запускает все проверки из файла конфигурации."""
+    config = configparser.ConfigParser()
+    config_path = 'monitoring_config.ini'
+    if not os.path.exists(config_path):
+        logger.error(f"Файл конфигурации {config_path} не найден.")
+        return f"❌ Файл конфигурации `{config_path}` не найден.", {}
+        
+    config.read(config_path)
+    
+    tasks = []
+    checks_info = []
+
+    for section in config.sections():
+        if not config.getboolean(section, 'enabled', fallback=False):
+            continue
+        
+        name = config.get(section, 'name', fallback=section)
+        
+        if config.has_option(section, 'http_address'):
+            url = config.get(section, 'http_address')
+            tasks.append(check_post_request(url))
+            checks_info.append({'group': name, 'type': 'HTTP', 'address': url})
+            
+        if config.has_option(section, 'web_address'):
+            url = config.get(section, 'web_address')
+            tasks.append(check_get_request(url))
+            checks_info.append({'group': name, 'type': 'WEB', 'address': url})
+            
+        if config.has_option(section, 'tcp_servers'):
+            servers = config.get(section, 'tcp_servers').split(',')
+            for server in servers:
+                server = server.strip()
+                if ':' in server:
+                    host, port_str = server.split(':', 1)
+                    try:
+                        port = int(port_str)
+                        tasks.append(check_tcp(host, port))
+                        checks_info.append({'group': name, 'type': 'TCP', 'address': f"{host}:{port}"})
+                    except ValueError:
+                        logger.error(f"Invalid port in config for {server}")
+        
+    if not tasks:
+        return "Нет активных серверов для проверки в `monitoring_config.ini`.", {}
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    report_by_group = {}
+    current_statuses = {}
+
+    for i, check in enumerate(checks_info):
+        status = results[i] is True
+        status_icon = "✅" if status else "❌"
+        group = check['group']
+        check_type = check['type']
+        address = check['address']
+        
+        if group not in report_by_group:
+            report_by_group[group] = []
+        
+        report_by_group[group].append(f"  `{check_type}`: {address} - {status_icon}")
+        current_statuses[f"{group}_{check_type}_{address}"] = status
+
+    message_parts = ["**🖥️ Результаты мониторинга:**\n"]
+    for group, lines in report_by_group.items():
+        message_parts.append(f"**{group}**")
+        message_parts.extend(lines)
+        message_parts.append("")
+
+    return "\n".join(message_parts), current_statuses
+
+async def monitoring_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик для ручного запуска мониторинга."""
+    if not has_permission(update.effective_user.id, "monitoring", context): return
+    
+    logger.info(f"User {update.effective_user.id} triggered manual monitoring.")
+    msg = await update.message.reply_text("Начинаю проверку серверов, пожалуйста, подождите...")
+    report, _ = await run_monitoring_checks()
+    await msg.edit_text(report, parse_mode='Markdown')
+
+async def scheduled_monitoring_check(context: ContextTypes.DEFAULT_TYPE):
+    """Функция для автоматического мониторинга по расписанию."""
+    logger.info("Running scheduled monitoring check...")
+    report, current_statuses = await run_monitoring_checks()
+    
+    last_statuses = context.bot_data.get('last_monitoring_statuses', {})
+    
+    notifications = []
+    for check_key, current_status in current_statuses.items():
+        last_status = last_statuses.get(check_key)
+        
+        if last_status is not None and last_status != current_status:
+            group, check_type, address = check_key.split('_', 2)
+            if current_status is False:
+                notifications.append(f"❌ **Сбой:** Сервис `{check_type}` системы **{group}** по адресу `{address}` стал недоступен!")
+            else:
+                notifications.append(f"✅ **Восстановление:** Сервис `{check_type}` системы **{group}** по адресу `{address}` снова доступен.")
+
+    if notifications:
+        message = "🚨 **Обновление статуса систем мониторинга:**\n\n" + "\n".join(notifications)
+        admins = [uid for uid, data in context.bot_data.get('permissions', {}).items() if 'admin' in data.get('perms', set())]
+        for admin_id in admins:
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=message, parse_mode='Markdown')
+            except Exception as e:
+                logger.error(f"Failed to send monitoring alert to {admin_id}: {e}")
+
+    context.bot_data['last_monitoring_statuses'] = current_statuses
+    logger.info("Scheduled monitoring check finished.")
+
 # --- 6. ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА ---
 async def main() -> None:
     """Главная функция для настройки и запуска бота."""
@@ -1315,15 +1475,15 @@ async def main() -> None:
     
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # Загружаем разрешения в кэш при старте
     application.bot_data['permissions'] = db_load_all_permissions()
-    
+    application.bot_data['last_monitoring_statuses'] = {}
+
     cancel_handler = MessageHandler(filters.Regex('^/cancel$') | filters.Regex('^Отмена$'), cancel)
     
     cert_analysis_conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("cert", cert_analysis_start),
-            MessageHandler(filters.Regex('^📜 Анализ сертификатов$'), cert_analysis_start)
+            MessageHandler(filters.Text("📜 Анализ сертификатов"), cert_analysis_start)
         ],
         states={
             CERT_AWAIT_FILES: [
@@ -1340,7 +1500,7 @@ async def main() -> None:
     )
 
     youtube_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^🎬 Скачивание с YouTube$'), youtube_entry)],
+        entry_points=[MessageHandler(filters.Text("🎬 Скачивание с YouTube"), youtube_entry)],
         states={
             AWAITING_YOUTUBE_LINK: [MessageHandler(filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_link)],
             CONFIRMING_DOWNLOAD: [CallbackQueryHandler(start_download_confirmed, pattern='^yt_confirm$'), CallbackQueryHandler(cancel_download, pattern='^yt_cancel$')]
@@ -1351,7 +1511,7 @@ async def main() -> None:
     akc_cert_filter = filters.Document.FileExtension("cer") | filters.Document.FileExtension("crt")
     
     akc_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^📄 Заявка АЦК$'), akc_start)],
+        entry_points=[MessageHandler(filters.Text("📄 Заявка АЦК"), akc_start)],
         states={
             AKC_CONFIRM_DEFAULTS: [CallbackQueryHandler(akc_use_defaults, pattern='^akc_use_defaults$'), CallbackQueryHandler(akc_refill_defaults, pattern='^akc_refill$')],
             AKC_SENDER_FIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, akc_get_sender_fio)],
@@ -1376,7 +1536,7 @@ async def main() -> None:
     )
 
     access_management_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^🔑 Управление доступом$'), access_management_start)],
+        entry_points=[MessageHandler(filters.Text("🔑 Управление доступом"), access_management_start)],
         states={
             ACCESS_MENU: [
                 CallbackQueryHandler(prompt_add_user, pattern='^access_add$'),
@@ -1407,10 +1567,16 @@ async def main() -> None:
     application.add_handler(CommandHandler("my_id", get_my_id))
     application.add_handler(CommandHandler("start", start))
     
-    application.add_handler(MessageHandler(filters.Regex("^(❓ Помощь)$"), help_command))
+    application.add_handler(MessageHandler(filters.Text("❓ Помощь"), help_command))
+    application.add_handler(MessageHandler(filters.Text("🖥️ Мониторинг серверов"), monitoring_start))
+    application.add_handler(CommandHandler("monitor", monitoring_start))
 
-    logger.info("Запускаю бота...")
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(scheduled_monitoring_check, 'interval', minutes=5, args=[application])
+    
+    logger.info("Запускаю бота и планировщик...")
     async with application:
+        scheduler.start()
         await application.start()
         await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
         await asyncio.Future()

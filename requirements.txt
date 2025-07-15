@@ -6,3 +6,4 @@ cryptography
 openpyxl
 python-dotenv
 apscheduler
+httpx
